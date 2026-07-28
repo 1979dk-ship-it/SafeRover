@@ -72,12 +72,14 @@ when the motors spike current.
 | Line sensor L / R | AO / AO | 34 / 35 | analog, ADC1, input-only pins |
 | OLED | SDA / SCL | 21 / 22 | I²C, address 0x3C |
 | Buzzer | + | 4 | |
-| Brake LEDs | anode | 16 | via 220 Ω each |
-| Status LED | anode | 17 | via 220 Ω |
+| Brake LEDs | anode | 19 | via 220 Ω each |
+| Status LED | anode | 13 | via 220 Ω |
 | Mode button | — | 23 | `INPUT_PULLUP` (pressed = LOW) |
 
 Pins avoid the ESP32 boot-strapping pins and ADC2 (disabled when Wi-Fi is on), so the
-analog line sensors sit on ADC1.
+analog line sensors sit on ADC1. They are also limited to the lines this 30-pin board
+actually breaks out — the chip has more GPIO than the headers expose, and GPIO 16/17
+are not among them.
 
 </details>
 

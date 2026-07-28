@@ -155,3 +155,60 @@ Remove the duplicate project copies for good, and open this journal.
 ### Next up
 Phase 1 — GPIO basics: serial output, read the mode button (`INPUT_PULLUP` on
 GPIO 23), drive an LED, then PWM via LEDC.
+
+---
+
+## Session 4 — 2026-07-28 — First brake light, and a pin map that did not survive contact
+
+### Goal
+Wire the first brake light on a breadboard and verify it, as the first physical
+component of Phase 1.
+
+### What was done
+- Built an LED circuit on a breadboard: a 220 Ω current-limiting resistor in series
+  with the LED, fed from an ESP32 pin and returned to GND.
+- Verified the circuit against a fixed 3V3 supply before connecting it to a
+  controlled pin. The LED lit.
+- Moved the feed wire from 3V3 to GPIO 19.
+- Updated the pin map after discovering the planned pins do not exist on this board.
+
+### Problems & challenges
+
+**Fault — the pins in the planned map are not broken out on this board**
+
+- **Symptom:** the planned pin map assigned GPIO 16 to the brake lights and GPIO 17
+  to the status LED. On physical inspection of the board, neither pin is marked
+  anywhere along its edge.
+- **Diagnosis:** the ESP32 chip has more GPIO lines than the development board routes
+  out to its headers. On this 30-pin DevKit V1, 16 and 17 are not among them. The
+  pins actually available are: 13, 12, 14, 27, 26, 25, 33, 32, 35, 34, 15, 2, 4, 5,
+  18, 19, 21, 22, 23. The pin map had been written from the chip's capabilities
+  rather than from this board's headers.
+- **Solution:** brake lights moved to GPIO 19, status LED to GPIO 13.
+
+**Fault — the first replacement pin collided with an existing assignment**
+
+- **Symptom:** GPIO 18 was the initial candidate for the status LED, but the pin map
+  already assigns GPIO 18 to the HC-SR04 ECHO line.
+- **Diagnosis:** cross-checking the remaining free pins against the whole contract —
+  not just against the pins already wired — left only 13, 12, 15 and 2 unassigned.
+  Three of those four carry boot-strapping duties: GPIO 2 drives the built-in LED and
+  affects boot, GPIO 15 (MTDO) silences the boot log if held low, and GPIO 12 (MTDI)
+  selects the flash voltage at power-on.
+- **Solution:** GPIO 13, the only remaining pin with no boot-strapping role.
+
+### Decisions & rationale
+
+- **Verify against a fixed voltage before moving to a controlled pin.** If the LED
+  lights on 3V3, then the circuit, the LED polarity and the resistor value are all off
+  the suspect list. Any fault after that point can only be in the code or the pin —
+  which turns one open-ended problem into a much smaller one.
+- **GPIO 2 was considered and rejected** for the brake light. It is tied to the
+  board's built-in LED, so the two would always light together, and it is a
+  boot-strapping pin whose level at power-on affects how the board starts.
+- **The pin map must be checked against the board, not the chip.** The remaining
+  assignments were re-verified against the available list at the same time, so the
+  rest of the contract is now known to be physically wireable.
+
+### Next up
+First code driving the brake light from GPIO 19.
