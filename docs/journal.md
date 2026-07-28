@@ -171,6 +171,9 @@ component of Phase 1.
   controlled pin. The LED lit.
 - Moved the feed wire from 3V3 to GPIO 19.
 - Updated the pin map after discovering the planned pins do not exist on this board.
+- Uploaded the first non-blocking blink code to the board. The brake light blinks on
+  GPIO 19, and the serial output reports the state on every toggle. Circuit, pin and
+  code are now verified end to end.
 
 ### Problems & challenges
 
@@ -211,4 +214,4 @@ component of Phase 1.
   rest of the contract is now known to be physically wireable.
 
 ### Next up
-First code driving the brake light from GPIO 19.
+Status LED on GPIO 13, then the mode button on GPIO 23 using `INPUT_PULLUP`.
