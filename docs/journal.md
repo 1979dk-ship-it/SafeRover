@@ -1,0 +1,157 @@
+# SafeRover — Work Journal
+
+This journal is an internal working tool, not the formal project book. It is written
+session by session, while the details are still fresh, and later feeds the official
+project book — mainly the chapter on the development process and the chapter on
+libraries and faults.
+
+Every entry follows the same template, so an entry can be lifted into the project book
+with little rewriting:
+
+- **Goal** — what the session set out to achieve.
+- **What was done** — what actually happened.
+- **Problems & challenges** — every fault written as `Symptom → Diagnosis → Solution`.
+- **Decisions & rationale** — what was chosen and *why*, including what was rejected.
+- **Next up** — the exact next action.
+
+Entries run oldest first. Sessions 1 and 2 were written retroactively on 2026-07-28;
+from session 3 onward each entry is written the same day.
+
+---
+
+## Session 1 — 2026-06-24 — Development environment setup
+
+### Goal
+Get a working ESP32 toolchain running end to end, and prove it by compiling a Blink
+program — before any hardware arrives.
+
+### What was done
+- Created the PlatformIO project for the ESP32 DOIT DevKit V1.
+- Selected and installed the pioarduino platform.
+- Configured clangd for IntelliSense.
+- Wrote Blink and compiled it successfully — `firmware.bin` generated.
+- Moved the project off OneDrive to an ASCII-only path.
+- Initialized Git, wrote `.gitignore`, and pushed the first four commits to GitHub.
+
+### Problems & challenges
+
+**Fault 1 — the linker could not write its map file**
+
+- **Symptom:** the build failed. The Xtensa linker (`ld.exe`) reported
+  `cannot open map file`. Separately, builds intermittently failed on locked files.
+- **Diagnosis:** the project was sitting under `OneDrive\מסמכים\…`, a path containing
+  non-ASCII (Hebrew) characters, and `ld.exe` cannot handle non-English characters in
+  paths. The file locking was a second, independent problem: OneDrive syncs files
+  while the build is still writing its output.
+- **Solution:** moved the project to `C:\Ariel\…` — an ASCII-only path outside any
+  cloud-synced folder. Both symptoms disappeared. This is now a permanent constraint
+  on the project.
+
+**Fault 2 — the editor reported errors on code that compiled fine**
+
+- **Symptom:** red underlines in the editor on code the compiler accepted without
+  complaint.
+- **Diagnosis:** IntelliSense and compilation are two separate paths. clangd is an
+  independent LLVM parser that serves the IDE only; the real build runs
+  `xtensa-esp32-elf-gcc`, a cross-compiler that runs on the PC and produces code for
+  the Xtensa LX6. The compiler is passed Xtensa-specific flags (`-mlongcalls`,
+  `-mfix-esp32-psram-cache-issue`, `-march=…`) that clangd does not recognize.
+- **Solution:** added a `.clangd` file that strips those flags before clangd sees
+  them. Standing conclusion for this project: **a red underline in the IDE is not a
+  compile error. The only authority is the build result — SUCCESS or FAILED.**
+
+### Decisions & rationale
+
+- **pioarduino instead of the official PlatformIO platform.** The official
+  `espressif32` platform stopped tracking the current Arduino-ESP32 core; pioarduino
+  is the maintained community fork that follows it. `platformio.ini` therefore points
+  `platform` at a pioarduino release URL rather than at `espressif32`. The official
+  platform was tried first and rejected for this reason.
+- **`.pio` is excluded from Git.** Build output is regenerated from the shared
+  toolchain in `C:\Users\1979d\.platformio` (~5.9 GB — compiler, framework and
+  flashing tools, shared across all projects). The repository holds source and
+  configuration only, so a clone on another machine rebuilds rather than downloads.
+- **ASCII-only path, outside OneDrive** — see Fault 1. Not a preference; a hard
+  constraint that must not be regressed.
+
+### Next up
+Upload Blink to the physical board once hardware arrives, to verify the chain past
+the compiler.
+
+---
+
+## Session 2 — 2026-07-07 — First upload to hardware
+
+### Goal
+Verify the toolchain past the compiler: get code from the editor onto the physical
+ESP32 and watch it run.
+
+### What was done
+- Rebuilt Blink — `firmware.bin` generated.
+- Flashed the board over USB for the first time.
+- **The on-board LED blinked.** The full edit → build → flash → run chain is verified
+  on real hardware.
+- Phase 0 (environment) complete.
+
+### Problems & challenges
+
+**Fault — unclear which copy of the project was the live one**
+
+- **Symptom:** more than one SafeRover folder existed on the machine, and it was not
+  obvious which one the IDE was building. Time was lost editing in one place while
+  building in another.
+- **Diagnosis:** the move off OneDrive in session 1 copied the project rather than
+  relocating it, leaving the original in place. Two trees with the same name coexisted
+  and their configuration had since diverged.
+- **Solution:** partial at this stage — work continued in the correct folder, but the
+  duplicates were left in place. Fully resolved in session 3.
+
+### Decisions & rationale
+- **Verify on hardware before writing more code.** A program that only compiles proves
+  the compiler works; it says nothing about the flashing tool, the USB-serial driver,
+  or the board itself. Testing the whole chain with a trivial program means that any
+  later failure points at the new code rather than at the setup.
+
+### Next up
+Clean up the duplicate project folders, then begin Phase 1.
+
+---
+
+## Session 3 — 2026-07-28 — Environment cleanup and journal setup
+
+### Goal
+Remove the duplicate project copies for good, and open this journal.
+
+### What was done
+- Mapped every SafeRover folder on the machine. Found three: the correct one, a stale
+  copy inside OneDrive, and a third entry that turned out to be a link into that copy.
+- Compared the trees file by file to confirm the stale copy held nothing unique, and
+  confirmed the live repository was fully pushed to GitHub before deleting anything.
+- Removed the link first, then the two real folders. One project folder remains.
+- Created this journal and the `photos/` directory.
+
+### Problems & challenges
+
+**Fault — one of the "copies" was a link, not a folder**
+
+- **Symptom:** three SafeRover directories appeared on the machine, seemingly
+  identical.
+- **Diagnosis:** `C:\PlatformIO\Projects\SafeRover` was a junction — a filesystem link
+  pointing at the OneDrive copy, not separate data. Deleting it recursively risked
+  following the link and destroying the target instead of just removing the pointer.
+- **Solution:** removed the link itself without recursion, verified the target was
+  still intact, and only then deleted the real folders. The stale copy was also found
+  to still carry the old broken configuration (`platform = espressif32`), which
+  independently confirmed which tree was the correct one.
+
+### Decisions & rationale
+- **Verify before deleting.** Both trees were compared file by file to prove nothing
+  unique would be lost, and the repository's sync state with GitHub was checked as a
+  fallback. Deletion is not reversible and the check cost minutes.
+- **Keep the journal in the repository, written in English.** It is written per
+  session rather than reconstructed at the end, so the Git history itself shows the
+  documentation evolving alongside the code.
+
+### Next up
+Phase 1 — GPIO basics: serial output, read the mode button (`INPUT_PULLUP` on
+GPIO 23), drive an LED, then PWM via LEDC.
