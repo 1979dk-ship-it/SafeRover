@@ -1,17 +1,34 @@
 #include <Arduino.h>
 
-// Phase 1 — brake light, status LED and mode button.
+// Phase 1 — brake light on PWM, status LED and mode button.
 // Pins follow the wiring contract in README.md. GPIO 16/17 from the original
 // plan are not broken out on this 30-pin board, so the brake light is on 19
 // and the status LED on 13.
+//
+// The PWM here runs on the brake light only because it is already wired and the
+// result is visible. In the finished rover the brake light is on/off, and this
+// same mechanism drives the L298N enable pins for motor speed.
 
 // --- Pin assignments ---
 constexpr uint8_t PIN_BRAKE_LIGHT = 19;
 constexpr uint8_t PIN_STATUS_LED  = 13;
 constexpr uint8_t PIN_MODE_BUTTON = 23;
 
+// --- PWM (LEDC) ---
+// LEDC is a peripheral inside the ESP32, not a software loop. Once a channel is
+// configured it keeps generating the waveform on its own, with no work from the
+// CPU, which leaves the main loop free to read sensors.
+constexpr uint8_t  PWM_CHANNEL_BRAKE   = 0;
+// 5 kHz is far above the rate the eye can follow, so the light looks steady
+// rather than flickering. 8 bits gives 256 steps, which is finer than anything
+// needed to control motor speed.
+constexpr uint32_t PWM_FREQUENCY_HZ    = 5000;
+constexpr uint8_t  PWM_RESOLUTION_BITS = 8;
+// Derived from the resolution so the two can never drift apart.
+constexpr uint32_t PWM_MAX_DUTY = (1UL << PWM_RESOLUTION_BITS) - 1;
+
 // --- Timing ---
-constexpr unsigned long BRAKE_BLINK_INTERVAL_MS = 500;
+constexpr unsigned long BRAKE_STEP_INTERVAL_MS = 1000;
 
 // Chosen to sit above the 1-20 ms a tactile switch typically bounces for, and
 // below the 100-150 ms gap between even fast human presses, so genuine presses
@@ -21,21 +38,42 @@ constexpr unsigned long BUTTON_DEBOUNCE_MS = 50;
 // --- Serial ---
 constexpr unsigned long SERIAL_BAUD = 115200;
 
-// Store when the last toggle happened rather than when the next one is due:
+// Brightness steps the brake light cycles through, as percentages.
+constexpr uint8_t BRAKE_DUTY_PERCENTS[] = {25, 50, 75, 100};
+constexpr size_t  BRAKE_DUTY_STEPS =
+    sizeof(BRAKE_DUTY_PERCENTS) / sizeof(BRAKE_DUTY_PERCENTS[0]);
+
+// Store when the last step happened rather than when the next one is due:
 // unsigned subtraction stays correct when millis() rolls over (~49 days).
-unsigned long lastBrakeToggle = 0;
-bool brakeLightOn = false;
+unsigned long lastBrakeStep = 0;
+size_t brakeDutyIndex = 0;
 
 // Previous button reading, so the loop can report changes instead of flooding
 // the serial line on every pass while the button is held down.
 bool lastButtonPressed = false;
 unsigned long lastButtonChange = 0;
 
+// Percentages are the readable unit; the hardware wants raw counts.
+static uint32_t dutyFromPercent(uint8_t percent) {
+  return (static_cast<uint32_t>(percent) * PWM_MAX_DUTY) / 100;
+}
+
+static void applyBrakeDuty(size_t index) {
+  const uint8_t percent = BRAKE_DUTY_PERCENTS[index];
+  ledcWrite(PIN_BRAKE_LIGHT, dutyFromPercent(percent));
+
+  Serial.print("BRAKE LIGHT DUTY ");
+  Serial.print(percent);
+  Serial.println("%");
+}
+
 void setup() {
   Serial.begin(SERIAL_BAUD);
 
-  pinMode(PIN_BRAKE_LIGHT, OUTPUT);
-  digitalWrite(PIN_BRAKE_LIGHT, LOW);
+  // Binding the channel explicitly rather than letting the core pick one, so the
+  // allocation stays predictable once the motor channels are added.
+  ledcAttachChannel(PIN_BRAKE_LIGHT, PWM_FREQUENCY_HZ, PWM_RESOLUTION_BITS,
+                    PWM_CHANNEL_BRAKE);
 
   // Lit for as long as the board is powered, so it also shows at a glance
   // that the firmware actually reached setup().
@@ -48,22 +86,22 @@ void setup() {
   // is why no external one is wired.
   pinMode(PIN_MODE_BUTTON, INPUT_PULLUP);
 
-  Serial.print("SafeRover boot OK - brake light on GPIO ");
+  Serial.print("SafeRover boot OK - brake light PWM on GPIO ");
   Serial.println(PIN_BRAKE_LIGHT);
+
+  applyBrakeDuty(brakeDutyIndex);
 }
 
 void loop() {
   const unsigned long now = millis();
 
-  // delay() is banned here by project convention: it blocks the whole loop,
-  // and later phases must keep polling the ultrasonic sensor while this blinks.
-  if (now - lastBrakeToggle >= BRAKE_BLINK_INTERVAL_MS) {
-    lastBrakeToggle = now;
+  // delay() is banned here by project convention: it blocks the whole loop, and
+  // later phases must keep polling the ultrasonic sensor while this steps.
+  if (now - lastBrakeStep >= BRAKE_STEP_INTERVAL_MS) {
+    lastBrakeStep = now;
 
-    brakeLightOn = !brakeLightOn;
-    digitalWrite(PIN_BRAKE_LIGHT, brakeLightOn ? HIGH : LOW);
-
-    Serial.println(brakeLightOn ? "BRAKE LIGHT ON" : "BRAKE LIGHT OFF");
+    brakeDutyIndex = (brakeDutyIndex + 1) % BRAKE_DUTY_STEPS;
+    applyBrakeDuty(brakeDutyIndex);
   }
 
   // Report transitions only, and only once the debounce window has passed. The
