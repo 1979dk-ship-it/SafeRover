@@ -153,7 +153,7 @@ The platform and board are pinned in [`platformio.ini`](platformio.ini).
 | Phase | Milestone | Status |
 |:-----:|-----------|:------:|
 | 0 | Environment — toolchain + Blink compiles | ✅ |
-| 1 | GPIO basics — Serial, button, LED, PWM | 🔄 |
+| 1 | GPIO basics — Serial, button, LED, PWM | ✅ |
 | 2 | Sensors on the bench — OLED, ultrasonic, line sensors | ⬜ |
 | 3 | Vehicle moves — chassis, power, straight-line trim | ⬜ |
 | 4 | Phone control — Wi-Fi dashboard + watchdog stop | ⬜ |

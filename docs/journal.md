@@ -289,3 +289,32 @@ of Phase 1.
 ### Next up
 PWM for brightness and speed control, toward integration with the L298N in the
 next phase.
+
+---
+
+## Session 6 — 2026-07-29 — PWM, and the end of Phase 1
+
+### Goal
+Close Phase 1 by adding PWM control.
+
+### What was done
+- Moved the brake light from plain on/off switching to LEDC PWM, cycling through
+  four duty steps.
+- Verified it both by eye — four distinct brightness levels — and in the serial
+  output, which reports every step.
+
+### Problems & challenges
+None. The change built and ran correctly the first time.
+
+### Decisions & rationale
+
+- **Implemented on an LED rather than a motor**, because the motors are not wired
+  yet and the LED gives immediate visual confirmation that the mechanism works.
+  The logic itself carries over unchanged to the ENA/ENB pins when the rover
+  starts driving.
+- **LEDC over `analogWrite`.** LEDC is a hardware peripheral: once a channel is
+  configured it generates the waveform on its own, with no CPU involvement, so
+  the main loop stays free for sensor reads.
+
+### Next up
+Phase 2 — sensors on the bench: OLED, ultrasonic, line sensors.
