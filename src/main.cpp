@@ -13,6 +13,11 @@ constexpr uint8_t PIN_MODE_BUTTON = 23;
 // --- Timing ---
 constexpr unsigned long BRAKE_BLINK_INTERVAL_MS = 500;
 
+// Chosen to sit above the 1-20 ms a tactile switch typically bounces for, and
+// below the 100-150 ms gap between even fast human presses, so genuine presses
+// still get through while the bounce does not.
+constexpr unsigned long BUTTON_DEBOUNCE_MS = 50;
+
 // --- Serial ---
 constexpr unsigned long SERIAL_BAUD = 115200;
 
@@ -24,6 +29,7 @@ bool brakeLightOn = false;
 // Previous button reading, so the loop can report changes instead of flooding
 // the serial line on every pass while the button is held down.
 bool lastButtonPressed = false;
+unsigned long lastButtonChange = 0;
 
 void setup() {
   Serial.begin(SERIAL_BAUD);
@@ -60,10 +66,13 @@ void loop() {
     Serial.println(brakeLightOn ? "BRAKE LIGHT ON" : "BRAKE LIGHT OFF");
   }
 
-  // Report transitions only. Deliberately undebounced for now: the raw contact
-  // bounce should be visible in the terminal before it gets filtered out.
+  // Report transitions only, and only once the debounce window has passed. The
+  // metal contacts bounce for a few milliseconds on every open and close, which
+  // the loop is fast enough to read as a burst of separate edges.
   const bool buttonPressed = (digitalRead(PIN_MODE_BUTTON) == LOW);
-  if (buttonPressed != lastButtonPressed) {
+  if (buttonPressed != lastButtonPressed &&
+      now - lastButtonChange >= BUTTON_DEBOUNCE_MS) {
+    lastButtonChange = now;
     lastButtonPressed = buttonPressed;
 
     Serial.println(buttonPressed ? "BUTTON PRESSED" : "BUTTON RELEASED");
