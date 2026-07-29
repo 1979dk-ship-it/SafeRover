@@ -47,30 +47,40 @@ remotely-viewable history.
 | Role | Part |
 |------|------|
 | Controller | ESP32 DevKit V1 (30-pin) |
-| Motor driver | L298N + 2× DC motors |
+| Chassis | CROB2 4WD, 4 motors, no caster |
+| Motor driver | L298N + 4× DC motors (4WD, driven as 2 channels) |
 | Distance | HC-SR04 ultrasonic |
 | Lane sensing | 2× TCRT5000 IR |
-| Display | 0.96" SSD1306 OLED (I²C) |
+| Display | 0.91" I²C OLED — controller not yet identified (SSD1306 or SH110X) |
 | Indicators | brake LEDs, buzzer, status LED |
 | Input | physical mode button |
 
 **Steering — differential, no servo.** Turning is a *speed difference* between the two
-wheels: the rover turns toward the slower side.
+sides: the rover turns toward the slower side. The two motors on each side are wired in
+parallel into a single L298N channel — the driver has only two channels, and motors on
+the same side always turn the same way at the same speed, so they need no separate
+control. 4WD changes the wiring, not the code: `drive(left, right)` is unchanged.
+
+Because the chassis is 4WD with no caster, all four wheels scrub sideways through a
+turn. This is expected, and it will make tuning `Kp` in the LKA phase slower.
 
 **Power.** Motors run from a 6×AA pack (~9 V); the ESP32 runs from a separate 5 V power
 bank; the two supplies share a common ground. Separating them prevents brownout resets
-when the motors spike current.
+when the motors spike current. The chassis's own 4×AA holder is not used.
+
+**Open on the display.** A 0.91" panel is usually 128×32 rather than 128×64. Both the
+resolution and the controller chip will be confirmed in phase 2.
 
 <details>
 <summary><b>Planned pin map (wiring contract)</b></summary>
 
 | Component | Signal | ESP32 pin | Notes |
 |-----------|--------|-----------|-------|
-| L298N | ENA / IN1 / IN2 | 32 / 33 / 25 | left motor (ENA = PWM) |
-| L298N | IN3 / IN4 / ENB | 26 / 27 / 14 | right motor (ENB = PWM) |
+| L298N | ENA / IN1 / IN2 | 32 / 33 / 25 | left side, 2 motors in parallel (ENA = PWM) |
+| L298N | IN3 / IN4 / ENB | 26 / 27 / 14 | right side, 2 motors in parallel (ENB = PWM) |
 | HC-SR04 | TRIG / ECHO | 5 / 18 | ECHO via a 1k/2k voltage divider |
 | Line sensor L / R | AO / AO | 34 / 35 | analog, ADC1, input-only pins |
-| OLED | SDA / SCL | 21 / 22 | I²C, address 0x3C |
+| OLED | SDA / SCL | 21 / 22 | I²C — confirm address with a scanner |
 | Buzzer | + | 4 | |
 | Brake LEDs | anode | 19 | via 220 Ω each |
 | Status LED | anode | 13 | via 220 Ω |
@@ -143,7 +153,7 @@ The platform and board are pinned in [`platformio.ini`](platformio.ini).
 | Phase | Milestone | Status |
 |:-----:|-----------|:------:|
 | 0 | Environment — toolchain + Blink compiles | ✅ |
-| 1 | GPIO basics — Serial, button, LED, PWM | ⬜ |
+| 1 | GPIO basics — Serial, button, LED, PWM | 🔄 |
 | 2 | Sensors on the bench — OLED, ultrasonic, line sensors | ⬜ |
 | 3 | Vehicle moves — chassis, power, straight-line trim | ⬜ |
 | 4 | Phone control — Wi-Fi dashboard + watchdog stop | ⬜ |
