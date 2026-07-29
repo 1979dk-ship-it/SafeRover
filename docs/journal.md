@@ -215,3 +215,77 @@ component of Phase 1.
 
 ### Next up
 Status LED on GPIO 13, then the mode button on GPIO 23 using `INPUT_PULLUP`.
+
+---
+
+## Session 5 — 2026-07-29 — Status LED, mode button, and three wiring faults
+
+### Goal
+Wire the status LED and the mode button, completing the input/output components
+of Phase 1.
+
+### What was done
+- Built a second LED circuit on the same breadboard for the status LED.
+- Wired the mode button using the ESP32's internal pull-up, with no external
+  resistor.
+- Observed contact bounce in the serial terminal and added a 50 ms software
+  debounce.
+
+### Problems & challenges
+
+**Fault 1 — the breadboard power rails are not continuous**
+
+- **Symptom:** the status LED did not light at all and the button produced no
+  events, while the brake light that already worked kept running normally.
+- **Diagnosis:** the 830-point board has four edge rails, a pair on each side,
+  and they are not joined to each other. The new components were connected to
+  the rails on one side while the controller's GND went to the other side. The
+  brake light was unaffected because it is fed directly from GPIO 19 rather than
+  through a rail.
+- **Solution:** moved every component onto the same GND rail the controller is
+  connected to. The status LED is now fed straight from GPIO 13 instead of going
+  through a power rail.
+
+**Fault 2 — the tactile button's leg spacing is not symmetric**
+
+- **Symptom:** the button read as permanently pressed from boot, and pressing it
+  changed nothing. Swapping in a different button did not change the behaviour.
+- **Diagnosis:** an isolation chain ruled out each layer in turn — the code, the
+  pin, and GND. Jumping GPIO 23 to GND by hand produced correct PRESSED and
+  RELEASED events, which cleared everything below the switch. Pulling only the
+  button, without touching any wire, made the symptom disappear and pinned the
+  fault on the component itself. The cause: the switch's leg spacing differs
+  between its two axes, so the internally connected pair runs along the length of
+  the board rather than across it. The two wires, placed on the same horizontal
+  line on either side of the centre channel, were therefore both landing on the
+  same pair — a permanent connection that no press could change.
+- **Solution:** moved the GND wire to an adjacent row on the same side of the
+  channel, so each wire faces a different pair. The button started working.
+
+**Fault 3 — contact bounce**
+
+- **Symptom:** a single press sometimes produced a pair of PRESSED/RELEASED
+  events milliseconds apart.
+- **Diagnosis:** normal physical behaviour of any mechanical switch. The contacts
+  bounce for 1-20 ms before settling, and the non-blocking loop is fast enough to
+  read every bounce as its own event.
+- **Solution:** a `millis()`-based software debounce with a 50 ms threshold —
+  above the typical bounce duration and below the 100-150 ms gap between even
+  fast human presses.
+
+### Decisions & rationale
+
+- **Isolate before replacing.** No component was swapped until each layer had
+  been ruled out separately: code, pin, GND, then the switch. Jumping the pin
+  straight to GND acted as a "perfect button" and tested everything underneath
+  the switch in one step.
+- **Assuming a tactile button is symmetric is wrong, and it cost time.** The
+  lesson recorded for the rest of the project: check a component's leg spacing
+  physically before assuming how it sits across the board.
+- **Confirm through the inverse symptom.** Removing the button and watching the
+  symptom vanish was the decisive evidence, because it isolated the component
+  without changing anything else in the circuit.
+
+### Next up
+PWM for brightness and speed control, toward integration with the L298N in the
+next phase.
