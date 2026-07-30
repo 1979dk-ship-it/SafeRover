@@ -246,21 +246,39 @@ of Phase 1.
   connected to. The status LED is now fed straight from GPIO 13 instead of going
   through a power rail.
 
-**Fault 2 — the tactile button's leg spacing is not symmetric**
+**Fault 2 — the tactile button was permanently closed**
 
 - **Symptom:** the button read as permanently pressed from boot, and pressing it
   changed nothing. Swapping in a different button did not change the behaviour.
-- **Diagnosis:** an isolation chain ruled out each layer in turn — the code, the
+- **Isolation:** an isolation chain ruled out each layer in turn — the code, the
   pin, and GND. Jumping GPIO 23 to GND by hand produced correct PRESSED and
   RELEASED events, which cleared everything below the switch. Pulling only the
   button, without touching any wire, made the symptom disappear and pinned the
-  fault on the component itself. The cause: the switch's leg spacing differs
-  between its two axes, so the internally connected pair runs along the length of
-  the board rather than across it. The two wires, placed on the same horizontal
-  line on either side of the centre channel, were therefore both landing on the
-  same pair — a permanent connection that no press could change.
-- **Solution:** moved the GND wire to an adjacent row on the same side of the
-  channel, so each wire faces a different pair. The button started working.
+  fault on the component itself.
+- **First diagnosis — later disproven:** the switch's leg spacing differs between
+  its two axes, so the internally connected pair runs along the length of the
+  board rather than across it. This is what was written down at the time, and the
+  wiring was changed on the strength of it.
+- **Re-check:** that description does not fit the layout that actually works. The
+  working wiring has the two jumpers in two consecutive rows on the *same* side of
+  the centre channel. For that to close anything, each internally connected pair
+  has to run *across* the board — one pair per row, its legs emerging on both
+  sides of the channel — and the switch closes between the two rows. The first
+  explanation had the pairs running the other way, which contradicts this.
+- **Actual cause:** the original layout put both jumpers on the same horizontal
+  line, one on each side of the channel. Both were therefore landing on the same
+  always-connected pair, tying GPIO 23 to GND permanently, independent of any
+  press.
+- **Solution:** two jumpers in two consecutive rows, so each faces a different
+  pair and the switch closes between them. The button started working.
+- **Confidence:** this reading comes from visual inspection of the working wiring
+  and from ruling out the alternatives, not from direct measurement. The pair
+  mapping will be checked with a multimeter in resistance mode once one is
+  available, and this entry will be corrected if the measurement disagrees.
+- **Method note:** a fix that works is not evidence that the explanation for it is
+  correct. Here the fix was right from the start while the reasoning behind it was
+  not, and the gap only surfaced on a second look. The two were verified
+  separately.
 
 **Fault 3 — contact bounce**
 
@@ -279,9 +297,11 @@ of Phase 1.
   been ruled out separately: code, pin, GND, then the switch. Jumping the pin
   straight to GND acted as a "perfect button" and tested everything underneath
   the switch in one step.
-- **Assuming a tactile button is symmetric is wrong, and it cost time.** The
-  lesson recorded for the rest of the project: check a component's leg spacing
-  physically before assuming how it sits across the board.
+- **An unverified assumption about a component's internals can produce a wrong
+  diagnosis.** The first explanation for this fault was itself an untested
+  assumption, and it survived until the entry was read back against the working
+  board. The lesson recorded for the rest of the project: measure a switch's
+  contact mapping before assuming how it sits on the board.
 - **Confirm through the inverse symptom.** Removing the button and watching the
   symptom vanish was the decisive evidence, because it isolated the component
   without changing anything else in the circuit.
