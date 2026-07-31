@@ -1,9 +1,10 @@
 #include <Arduino.h>
 
 // Phase 1 — brake light on PWM, status LED and mode button.
-// Phase 2 — reading the left line sensor. Data collection only: there are no
-// thresholds here yet, because the values the sensor returns over white and over
-// black have not been measured.
+// Phase 2 — two line sensors on GPIO 34 and 35, read and reported together with
+// the difference between them. Their reference values have been measured on the
+// bench; see the comment beside the pin definitions. Still data collection only:
+// there are no thresholds and no decisions in this file yet.
 // Pins follow the wiring contract in README.md. GPIO 16/17 from the original
 // plan are not broken out on this 30-pin board, so the brake light is on 19
 // and the status LED on 13.
@@ -58,7 +59,7 @@ constexpr uint32_t PWM_FREQUENCY_HZ = 5000;
 constexpr uint8_t PWM_RESOLUTION_BITS = 8;
 // Derived from the resolution so the two can never drift apart.
 constexpr uint32_t PWM_MAX_DUTY =
-    (1UL << PWM_RESOLUTION_BITS) - 1; // UL unsigend long
+    (1UL << PWM_RESOLUTION_BITS) - 1; // UL unsigned long
 
 // --- Timing ---
 constexpr unsigned long BRAKE_STEP_INTERVAL_MS = 1000;
