@@ -338,3 +338,97 @@ None. The change built and ran correctly the first time.
 
 ### Next up
 Phase 2 — sensors on the bench: OLED, ultrasonic, line sensors.
+
+---
+
+## Session 7 — 2026-07-31 — Line sensors on the bench
+
+### Goal
+Verify both line sensors on the bench and measure the reference points the LKA
+will be built on.
+
+### What was done
+- Wired two TCRT5000 modules (HW-870) on GPIO 34 and 35, analog output only.
+- Wrote read-only code — no thresholds — and used it to find the working height
+  and the reference values by experiment.
+
+Measurements, taken at a working height of 3.5 cm and averaged over 16 samples:
+
+| Condition | Left | Right | Delta (L−R) |
+|---|---|---|---|
+| Both over white | ~60 | ~70 | ~−10 |
+| Both over black | ~4028 | ~4006 | ~+20 |
+| One over each colour | — | — | ~4030 |
+
+Noise on a steady reading is about ±7. Note the direction: **a high value means a
+dark surface**, which is the opposite of the intuitive reading.
+
+### Problems & challenges
+
+**Fault 1 — the wrong working height hid the signal**
+
+- **Symptom:** at a height of about 8.5 cm the gap between white and black was
+  only around 300 counts — under 8% of the range.
+- **Diagnosis:** the TCRT5000 is a short-range part, and the strength of the
+  reflected light falls off with the square of the distance. At that height almost
+  nothing was coming back from the module's own LED, so the difference being
+  measured was mostly reflected ambient light rather than the sensor's own signal.
+  The readings were also found to depend on the room lighting, because the
+  phototransistor responds to any infrared reaching it, not only to light from the
+  module's LED.
+- **Solution:** lowered the working height to 3.5 cm and fixed the sensor in the
+  breadboard instead of holding it by hand. The gap rose to about 4030 counts at
+  roughly ±7 of noise, and the dependence on room lighting became negligible except
+  under strong direct light. Being close to the surface is what lets the LED's own
+  signal swamp the ambient light.
+
+**Fault 2 — slight coupling between the PWM and the analog reading**
+
+- **Symptom:** the line sensor readings rise by a consistent 10 to 15 counts as the
+  brake light's duty increases, across all four steps.
+- **Diagnosis:** the effect tracks the duty exactly and is not random noise. It was
+  not visible in the first measurement because the values there were high and the
+  noise covered it. The likely mechanism is optical rather than electrical: the
+  brake light sits close to the sensors on the same breadboard, so part of its
+  light reaches the phototransistor directly and adds to what the sensor sees. This
+  has not been confirmed by measurement — covering the LED and watching whether the
+  effect disappears would settle it.
+- **Solution:** none needed at this stage. 15 counts out of a 4030 range is under
+  half a percent and does not affect detection. Two things carry forward from it.
+  If the cause is optical, the brake light and the line sensors must not end up
+  facing each other once they are mounted on the chassis. And the readings should be
+  checked again with the motors running, since those add electrical noise of their
+  own regardless of what causes this particular effect.
+
+### Decisions & rationale
+
+- **Analog output (AO) rather than the digital output (DO).** The LKA is built on
+  a proportional controller that corrects in proportion to how far off the line the
+  rover is. DO returns a binary answer after comparing against a threshold, which
+  does not carry that magnitude.
+- **Modules powered from 3.3 V rather than 5 V.** The AO output cannot exceed its
+  own supply voltage, so running the modules at 3.3 V means the output can never
+  exceed what an ESP32 pin tolerates. That removes the need for a voltage divider.
+- **Both sensors on ADC1 (GPIO 34 and 35).** ADC2 is unusable while Wi-Fi is
+  running because it shares hardware with the radio. Choosing ADC2 would have made
+  the sensors stop working at the moment Wi-Fi was switched on — a fault that is
+  hard to trace back to its cause. 34 and 35 are also input-only pins.
+- **No per-sensor correction factor.** The two sensors read within 10 to 20 counts
+  of each other over the same surface, which is under half a percent of the working
+  range. Calibrating them individually would add complexity for no measurable gain.
+- **The OLED was deferred.** Its pin header arrived unsoldered, and an unsoldered
+  connection would have introduced intermittent contact faults. The part was put off
+  until it can be soldered rather than risking that.
+
+### Photos
+
+| File | What it shows |
+|---|---|
+| `phase2-line-sensors-closeup.jpg` | Both TCRT5000 modules mounted on the breadboard alongside the brake light, status LED and mode button |
+| `phase2-line-sensors-test-setup.jpg` | The bench arrangement used for the measurements. The tin serves as a stand — the white sheet and the black surface were leaned against it in front of the sensors |
+| `phase2-serial-output-over-black.jpg` | Serial output with both sensors over a dark surface — the readings near 4030 and the delta near 20 |
+| `phase2-workspace-overview.jpg` | The wider bench, including the parts not yet in use |
+
+### Next up
+The OLED once its header is soldered, then the HC-SR04 with a voltage divider,
+which needs a multimeter to verify before it is connected to a pin.

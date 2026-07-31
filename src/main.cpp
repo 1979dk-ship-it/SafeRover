@@ -23,10 +23,17 @@ constexpr uint8_t PIN_MODE_BUTTON = 23;
 // LKA needs a continuous value for its proportional controller, not a binary DO
 // answer.
 //
-// Measured on the bench at the working height of 3.5 cm: a white surface reads
-// about 40, a black one about 3720, with roughly +/-7 of noise. The direction is
-// the opposite of the intuitive one — a HIGH value means a DARK surface, so a
-// high reading is the sensor sitting over the line.
+// Measured on the bench at the working height of 3.5 cm, averaged over 16
+// samples. The direction is the opposite of the intuitive one — a HIGH value
+// means a DARK surface, so a high reading is the sensor sitting over the line.
+//
+//   both over white    L ~60     R ~70     delta ~-10
+//   both over black    L ~4028   R ~4006   delta ~+20
+//   one over each                          delta ~4030
+//
+// Noise on a steady reading is about +/-7. The two sensors track each other to
+// within 20 counts over the same surface — under 1% of range — so neither needs
+// its own correction factor.
 constexpr uint8_t PIN_LINE_SENSOR_LEFT = 34;
 constexpr uint8_t PIN_LINE_SENSOR_RIGHT = 35;
 
