@@ -17,11 +17,18 @@ constexpr uint8_t PIN_BRAKE_LIGHT = 19;
 constexpr uint8_t PIN_STATUS_LED = 13;
 constexpr uint8_t PIN_MODE_BUTTON = 23;
 
-// GPIO 34 sits on ADC1. ADC2 cannot be used while Wi-Fi is running because it
-// shares hardware with the radio, so every analog sensor in this project stays on
-// GPIO 32-39. Only the module's analog output is wired: the LKA needs a
-// continuous value for its proportional controller, not a binary DO answer.
+// Both line sensors sit on ADC1. ADC2 cannot be used while Wi-Fi is running
+// because it shares hardware with the radio, so every analog sensor in this
+// project stays on GPIO 32-39. Only the modules' analog outputs are wired: the
+// LKA needs a continuous value for its proportional controller, not a binary DO
+// answer.
+//
+// Measured on the bench at the working height of 3.5 cm: a white surface reads
+// about 40, a black one about 3720, with roughly +/-7 of noise. The direction is
+// the opposite of the intuitive one — a HIGH value means a DARK surface, so a
+// high reading is the sensor sitting over the line.
 constexpr uint8_t PIN_LINE_SENSOR_LEFT = 34;
+constexpr uint8_t PIN_LINE_SENSOR_RIGHT = 35;
 
 // --- ADC ---
 // 12 bits gives a 0-4095 range, and ADC_11db widens the input range so the whole
@@ -89,22 +96,16 @@ static void applyBrakeDuty(size_t index) {
   Serial.println("%");
 }
 
-// Both numbers are reported so the raw spread can be judged against the average.
-struct LineReading {
-  uint16_t raw;     // final single sample of the burst
-  uint16_t average; // mean of the burst
-};
-
-static LineReading readLineSensor(uint8_t pin) {
+// One reader for both sensors — they are the same part on the same ADC, so the
+// pin is the only thing that differs.
+static uint16_t readLineAveraged(uint8_t pin) {
   uint32_t total = 0;
-  uint16_t raw = 0;
 
   for (uint8_t i = 0; i < LINE_SENSOR_SAMPLES; i++) {
-    raw = analogRead(pin);
-    total += raw;
+    total += analogRead(pin);
   }
 
-  return {raw, static_cast<uint16_t>(total / LINE_SENSOR_SAMPLES)};
+  return static_cast<uint16_t>(total / LINE_SENSOR_SAMPLES);
 }
 
 void setup() {
@@ -128,6 +129,7 @@ void setup() {
 
   analogReadResolution(ADC_RESOLUTION_BITS);
   analogSetPinAttenuation(PIN_LINE_SENSOR_LEFT, ADC_11db);
+  analogSetPinAttenuation(PIN_LINE_SENSOR_RIGHT, ADC_11db);
 
   Serial.print("SafeRover boot OK - brake light PWM on GPIO ");
   Serial.println(PIN_BRAKE_LIGHT);
@@ -163,11 +165,19 @@ void loop() {
   if (now - lastLinePrint >= LINE_PRINT_INTERVAL_MS) {
     lastLinePrint = now;
 
-    const LineReading line = readLineSensor(PIN_LINE_SENSOR_LEFT);
+    const uint16_t left = readLineAveraged(PIN_LINE_SENSOR_LEFT);
+    const uint16_t right = readLineAveraged(PIN_LINE_SENSOR_RIGHT);
 
-    Serial.print("LINE L  raw=");
-    Serial.print(line.raw);
-    Serial.print("  avg=");
-    Serial.println(line.average);
+    // Left minus right is the error signal the LKA's P controller will act on:
+    // zero means the rover is centred, and the sign says which way it drifted.
+    const int16_t delta =
+        static_cast<int16_t>(left) - static_cast<int16_t>(right);
+
+    Serial.print("LINE  L=");
+    Serial.print(left);
+    Serial.print("  R=");
+    Serial.print(right);
+    Serial.print("  delta=");
+    Serial.println(delta);
   }
 }
