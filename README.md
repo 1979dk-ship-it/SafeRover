@@ -93,6 +93,12 @@ analog line sensors sit on ADC1. They are also limited to the lines this 30-pin 
 actually breaks out — the chip has more GPIO than the headers expose, and GPIO 16/17
 are not among them.
 
+**PWM channel allocation.** The ESP32's eight LEDC channels share four timers in pairs
+(0-1, 2-3, 4-5, 6-7), and the frequency is a property of the timer rather than the
+channel — two channels on one timer cannot run at different frequencies. Channels are
+therefore assigned so that nothing shares a timer: **0** for the brake light, **2** for
+ENA (left side) and **4** for ENB (right side).
+
 </details>
 
 ---

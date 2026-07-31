@@ -51,7 +51,17 @@ constexpr uint8_t LINE_SENSOR_SAMPLES = 16;
 // LEDC is a peripheral inside the ESP32, not a software loop. Once a channel is
 // configured it keeps generating the waveform on its own, with no work from the
 // CPU, which leaves the main loop free to read sensors.
-constexpr uint8_t PWM_CHANNEL_BRAKE = 0;
+//
+// The eight channels share four timers in pairs — 0-1, 2-3, 4-5, 6-7 — and the
+// frequency belongs to the timer, not to the channel. Two channels on the same
+// timer therefore cannot run at different frequencies: setting one silently
+// changes the other, with no error raised. The motors will want a frequency of
+// their own, so they are reserved here on channels that sit on separate timers.
+// Declared before the L298N is wired so the allocation cannot be taken by
+// accident later.
+constexpr uint8_t PWM_CHANNEL_BRAKE = 0;                      // timer 0
+[[maybe_unused]] constexpr uint8_t PWM_CHANNEL_MOTOR_LEFT = 2; // timer 1, ENA
+[[maybe_unused]] constexpr uint8_t PWM_CHANNEL_MOTOR_RIGHT = 4; // timer 2, ENB
 // 5 kHz is far above the rate the eye can follow, so the light looks steady
 // rather than flickering. 8 bits gives 256 steps, which is finer than anything
 // needed to control motor speed.
