@@ -1,6 +1,9 @@
 #include <Arduino.h>
 
 // Phase 1 — brake light on PWM, status LED and mode button.
+// Phase 2 — reading the left line sensor. Data collection only: there are no
+// thresholds here yet, because the values the sensor returns over white and over
+// black have not been measured.
 // Pins follow the wiring contract in README.md. GPIO 16/17 from the original
 // plan are not broken out on this 30-pin board, so the brake light is on 19
 // and the status LED on 13.
@@ -11,24 +14,41 @@
 
 // --- Pin assignments ---
 constexpr uint8_t PIN_BRAKE_LIGHT = 19;
-constexpr uint8_t PIN_STATUS_LED  = 13;
+constexpr uint8_t PIN_STATUS_LED = 13;
 constexpr uint8_t PIN_MODE_BUTTON = 23;
+
+// GPIO 34 sits on ADC1. ADC2 cannot be used while Wi-Fi is running because it
+// shares hardware with the radio, so every analog sensor in this project stays on
+// GPIO 32-39. Only the module's analog output is wired: the LKA needs a
+// continuous value for its proportional controller, not a binary DO answer.
+constexpr uint8_t PIN_LINE_SENSOR_LEFT = 34;
+
+// --- ADC ---
+// 12 bits gives a 0-4095 range, and ADC_11db widens the input range so the whole
+// 0-3.3 V the sensor can put out is measurable.
+constexpr uint8_t ADC_RESOLUTION_BITS = 12;
+
+// The ADC is noisy: repeated reads of a steady voltage still differ by tens of
+// counts. Averaging a burst of samples narrows that spread.
+constexpr uint8_t LINE_SENSOR_SAMPLES = 16;
 
 // --- PWM (LEDC) ---
 // LEDC is a peripheral inside the ESP32, not a software loop. Once a channel is
 // configured it keeps generating the waveform on its own, with no work from the
 // CPU, which leaves the main loop free to read sensors.
-constexpr uint8_t  PWM_CHANNEL_BRAKE   = 0;
+constexpr uint8_t PWM_CHANNEL_BRAKE = 0;
 // 5 kHz is far above the rate the eye can follow, so the light looks steady
 // rather than flickering. 8 bits gives 256 steps, which is finer than anything
 // needed to control motor speed.
-constexpr uint32_t PWM_FREQUENCY_HZ    = 5000;
-constexpr uint8_t  PWM_RESOLUTION_BITS = 8;
+constexpr uint32_t PWM_FREQUENCY_HZ = 5000;
+constexpr uint8_t PWM_RESOLUTION_BITS = 8;
 // Derived from the resolution so the two can never drift apart.
-constexpr uint32_t PWM_MAX_DUTY = (1UL << PWM_RESOLUTION_BITS) - 1;
+constexpr uint32_t PWM_MAX_DUTY =
+    (1UL << PWM_RESOLUTION_BITS) - 1; // UL unsigend long
 
 // --- Timing ---
 constexpr unsigned long BRAKE_STEP_INTERVAL_MS = 1000;
+constexpr unsigned long LINE_PRINT_INTERVAL_MS = 200;
 
 // Chosen to sit above the 1-20 ms a tactile switch typically bounces for, and
 // below the 100-150 ms gap between even fast human presses, so genuine presses
@@ -40,7 +60,7 @@ constexpr unsigned long SERIAL_BAUD = 115200;
 
 // Brightness steps the brake light cycles through, as percentages.
 constexpr uint8_t BRAKE_DUTY_PERCENTS[] = {25, 50, 75, 100};
-constexpr size_t  BRAKE_DUTY_STEPS =
+constexpr size_t BRAKE_DUTY_STEPS =
     sizeof(BRAKE_DUTY_PERCENTS) / sizeof(BRAKE_DUTY_PERCENTS[0]);
 
 // Store when the last step happened rather than when the next one is due:
@@ -52,6 +72,8 @@ size_t brakeDutyIndex = 0;
 // the serial line on every pass while the button is held down.
 bool lastButtonPressed = false;
 unsigned long lastButtonChange = 0;
+
+unsigned long lastLinePrint = 0;
 
 // Percentages are the readable unit; the hardware wants raw counts.
 static uint32_t dutyFromPercent(uint8_t percent) {
@@ -67,11 +89,29 @@ static void applyBrakeDuty(size_t index) {
   Serial.println("%");
 }
 
+// Both numbers are reported so the raw spread can be judged against the average.
+struct LineReading {
+  uint16_t raw;     // final single sample of the burst
+  uint16_t average; // mean of the burst
+};
+
+static LineReading readLineSensor(uint8_t pin) {
+  uint32_t total = 0;
+  uint16_t raw = 0;
+
+  for (uint8_t i = 0; i < LINE_SENSOR_SAMPLES; i++) {
+    raw = analogRead(pin);
+    total += raw;
+  }
+
+  return {raw, static_cast<uint16_t>(total / LINE_SENSOR_SAMPLES)};
+}
+
 void setup() {
   Serial.begin(SERIAL_BAUD);
 
-  // Binding the channel explicitly rather than letting the core pick one, so the
-  // allocation stays predictable once the motor channels are added.
+  // Binding the channel explicitly rather than letting the core pick one, so
+  // the allocation stays predictable once the motor channels are added.
   ledcAttachChannel(PIN_BRAKE_LIGHT, PWM_FREQUENCY_HZ, PWM_RESOLUTION_BITS,
                     PWM_CHANNEL_BRAKE);
 
@@ -85,6 +125,9 @@ void setup() {
   // closing it drags the pin down and a press reads LOW. That internal resistor
   // is why no external one is wired.
   pinMode(PIN_MODE_BUTTON, INPUT_PULLUP);
+
+  analogReadResolution(ADC_RESOLUTION_BITS);
+  analogSetPinAttenuation(PIN_LINE_SENSOR_LEFT, ADC_11db);
 
   Serial.print("SafeRover boot OK - brake light PWM on GPIO ");
   Serial.println(PIN_BRAKE_LIGHT);
@@ -114,5 +157,17 @@ void loop() {
     lastButtonPressed = buttonPressed;
 
     Serial.println(buttonPressed ? "BUTTON PRESSED" : "BUTTON RELEASED");
+  }
+
+  // Data collection only: read and report. No thresholds, no decisions.
+  if (now - lastLinePrint >= LINE_PRINT_INTERVAL_MS) {
+    lastLinePrint = now;
+
+    const LineReading line = readLineSensor(PIN_LINE_SENSOR_LEFT);
+
+    Serial.print("LINE L  raw=");
+    Serial.print(line.raw);
+    Serial.print("  avg=");
+    Serial.println(line.average);
   }
 }
