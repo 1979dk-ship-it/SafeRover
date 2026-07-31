@@ -3,8 +3,10 @@
 A small autonomous rover that demonstrates two active automotive safety systems —
 **Autonomous Emergency Braking (AEB)** and **Lane Keeping Assist (LKA)** — on an ESP32.
 
-> 🚧 **Status:** In active development. Phase 0 (toolchain + environment) complete;
-> hardware integration in progress. See the [roadmap](#roadmap).
+> 🚧 **Status:** In active development. Phases 0 and 1 are complete — the board runs a
+> non-blocking loop driving a PWM brake light, a status LED and a debounced mode button.
+> Phase 2 is in progress: both line sensors are wired, calibrated and reading.
+> See the [roadmap](#roadmap).
 
 SafeRover runs two independent closed control loops (sense → decide → act) on top of a
 real-time state machine.
@@ -154,7 +156,7 @@ The platform and board are pinned in [`platformio.ini`](platformio.ini).
 |:-----:|-----------|:------:|
 | 0 | Environment — toolchain + Blink compiles | ✅ |
 | 1 | GPIO basics — Serial, button, LED, PWM | ✅ |
-| 2 | Sensors on the bench — OLED, ultrasonic, line sensors | ⬜ |
+| 2 | Sensors on the bench — OLED, ultrasonic, line sensors | 🔄 |
 | 3 | Vehicle moves — chassis, power, straight-line trim | ⬜ |
 | 4 | Phone control — Wi-Fi dashboard + watchdog stop | ⬜ |
 | 5 | AEB — 3-stage braking + hysteresis | ⬜ |
@@ -163,7 +165,17 @@ The platform and board are pinned in [`platformio.ini`](platformio.ini).
 | 8 | IoT — live dashboard, NTP, cloud event log | ⬜ |
 | 9 | Finish — enclosure, portfolio, dry run | ⬜ |
 
-_Wiring photos and a demo video will be added here as the hardware comes together._
+### Progress photos
+
+[`photos/`](photos/) holds a shot of the breadboard at each stage, plus the serial output
+captured while the line sensors were being calibrated.
+
+![Both TCRT5000 line sensors on the breadboard, alongside the brake light, status LED and mode button](photos/phase2-line-sensors-closeup.jpg)
+
+A build log with the measurements and the faults hit along the way is in
+[`docs/journal.md`](docs/journal.md).
+
+_A demo video will follow once the rover drives._
 
 ---
 
