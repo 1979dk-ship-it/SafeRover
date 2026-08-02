@@ -271,10 +271,51 @@ of Phase 1.
   press.
 - **Solution:** two jumpers in two consecutive rows, so each faces a different
   pair and the switch closes between them. The button started working.
-- **Confidence:** this reading comes from visual inspection of the working wiring
-  and from ruling out the alternatives, not from direct measurement. The pair
-  mapping will be checked with a multimeter in resistance mode once one is
-  available, and this entry will be corrected if the measurement disagrees.
+- **Confidence at the time:** that reading came from visual inspection of the
+  working wiring and from ruling out the alternatives, not from direct
+  measurement, so the entry was left open pending a multimeter check in
+  resistance mode. The measurement has since been taken and it agreed with the
+  reading; see the verification below.
+- **Verification:** measured with an Omega DT830D in resistance mode on the 200 Ω
+  range — the unit has no continuity mode with a buzzer. All power was
+  disconnected and both control wires were pulled out to isolate the button, and
+  four jumpers were pushed into the four junctions to bring the contact points
+  off the board where the probes can reach them. A control reading came first, to
+  calibrate what "connected" looks like: two jumpers in two holes of the same
+  breadboard row — a guaranteed connection — read 1.5 Ω. That is the overhead of
+  the measuring setup itself, the probes, the jumpers and the spring contacts,
+  and it is the definition of "connected" for every reading below. The four
+  junctions are named by which side of the centre channel they sit on: A1 and B1
+  are the two rows to the left of it, one carrying GPIO 23 and the other GND;
+  A2 and B2 are the rows facing them across the channel.
+
+Readings with the button not pressed:
+
+| Pair | Reading | Meaning |
+|---|---|---|
+| A1-B1 | OL | open |
+| A1-A2 | 1.5 Ω | connected |
+| B1-B2 | 1.5 Ω | connected |
+| A1-B2 | OL | open |
+| B1-A2 | OL | open |
+| A2-B2 | OL | open |
+
+The contact pairs run across the channel. A1-A2 are one permanently joined pair,
+B1-B2 are the other, and at rest there is no path of any kind between them.
+A1-A2 read exactly the control value, which means a continuous metal path with no
+component in between.
+
+This measures the original failure mechanism directly. The layout that failed put
+GND and GPIO 23 on the same row number on opposite sides of the channel —
+junctions A1 and A2 — which the table now shows are permanently joined. The two
+control wires were shorted together through the button's internal metal,
+bypassing the switch contacts entirely, so the pin read LOW at all times.
+
+- **Not measured:** the same six pairs with the button held down. That round was
+  skipped because it needs two probes and the button held at once. The switch
+  element itself therefore rests on behavioural evidence — the Phase 1 firmware
+  reads press events correctly, with edge detection and debounce — and not on a
+  direct measurement.
 - **Method note:** a fix that works is not evidence that the explanation for it is
   correct. Here the fix was right from the start while the reasoning behind it was
   not, and the gap only surfaced on a second look. The two were verified
