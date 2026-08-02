@@ -473,3 +473,217 @@ dark surface**, which is the opposite of the intuitive reading.
 ### Next up
 The OLED once its header is soldered, then the HC-SR04 with a voltage divider,
 which needs a multimeter to verify before it is connected to a pin.
+
+---
+
+## Session 8 — 2026-08-02 — HC-SR04: divider design, verification and characterisation
+
+### Goal
+Bring the ultrasonic sensor up on the bench without damaging a GPIO, and measure
+what the sensor actually does before any AEB logic is designed against it.
+
+### What was done
+- Designed and built a 1k/2k voltage divider for the ECHO line, and verified it in
+  three stages before it was ever connected to a pin.
+- Wired the sensor: TRIG on GPIO 5 direct, ECHO on GPIO 18 through the divider,
+  the module fed from VIN at 5.1 V, all grounds on a common node.
+- Wrote the read code — trigger pulse, `pulseIn` with an explicit timeout, and the
+  conversion to centimetres — and used it to characterise the sensor.
+
+**Why the divider is needed at all.** The module runs on 5 V, so its ECHO pulse
+comes out at 5 V. ESP32 pins are 3.3 V parts, and the protection diodes on the
+input start conducting somewhere above about 3.6 V. The damage from that is
+usually cumulative rather than immediate, which is what makes it dangerous: the
+pin keeps working, and then starts returning wrong readings days later, by which
+point the suspicion has already been aimed at the code.
+
+**The idea the whole design rests on: a part's signal voltage is set by its supply
+voltage.** A logic gate represents "on" by driving its output up to its own
+supply, so a part living on 5 V cannot produce a 3.3 V signal. The problem is
+therefore not the sensor's supply — it is the signal that supply produces. That is
+why the fix does not touch the supply at all, and intercepts the signal on the way
+instead.
+
+**TRIG gets no divider.** The danger only exists in one direction. The ESP32 puts
+out 3.3 V and the HC-SR04's detection threshold is around 2 V, so 3.3 V into a
+5 V input reads as HIGH and works. 5 V into a 3.3 V input is the case that does
+damage.
+
+### The three-level verification
+
+One principle ran through the whole session: measure something whose answer is
+already known, to calibrate both the instrument and the way its output is read,
+before measuring something whose answer is not known.
+
+| Level | Measured | Expected | What it establishes |
+|---|---|---|---|
+| 1. Resistance, no power | top 960 Ω, bottom 1970 Ω, the two in series 2.98 kΩ | the parts add up to the whole | the circuit is complete and mechanically stable |
+| 2. Static voltage | 5.1 V in, 3.42 V out | 5.1 * 1970 / 2930 = 3.43 V | it behaves the way the model predicts, not merely "works" |
+| 3. At rest, sensor on supply only, no TRIG and no GPIO | sensor 5.1 V, divider out 0 V | ECHO idle low | the sensor has power *and* its output sits low |
+
+Level 1's consistency test is the point of it: the two parts add to 2.93 kΩ
+against 2.98 kΩ measured directly across the pair, which agree to within about 2%
+— inside the meter's accuracy across two different ranges. A nominal resistor
+carries a 5% tolerance, so every calculation above uses the measured values rather
+than the nominal ones.
+
+Level 3 needs both of its readings together. A 0 V output on its own does not
+distinguish a healthy sensor whose ECHO line idles low from a sensor receiving no
+power at all. Those two faults look identical in a single measurement.
+
+**Caveat on level 3.** The sensor's supply was measured at the board's VIN pin
+rather than at the sensor's own VCC leg, so the jumper between them was never
+verified directly. That is the first thing to check if the sensor behaves oddly.
+
+### Problems & challenges
+
+**Fault 1 — resistance readings that did not add up**
+
+- **Symptom:** the top section measured 960 Ω, the bottom 1450 Ω, and the pair in
+  series 1846 Ω. The whole was smaller than the sum of its parts, which is not
+  physically possible in a series circuit.
+- **First diagnosis — wrong:** the fault was assumed to be mechanical. The resistor
+  legs were long and twisted and could have shifted between measurements, so the
+  circuit was pulled apart and rebuilt with short legs bent at right angles.
+- **Actual cause:** the meter was still on the 200 Ω range, which cannot display
+  anything above 200. The readings were not valid measurements at all.
+- **The clue that was missed:** 1450 Ω is not a standard resistor value. A number
+  that does not look like a component usually is not one.
+- **Solution:** switched to the correct range and re-measured, giving the values in
+  the table above.
+- **Method note:** when numbers contradict each other, the first suspect is the
+  instrument, not the circuit. Here the hardware was rebuilt before the validity of
+  the measurement had been established — against the "isolate before replacing"
+  principle already recorded in session 5.
+
+**Fault 2 — the two resistors were installed the wrong way round**
+
+- **Symptom:** the divider output measured 1.67 V instead of the expected 3.42 V.
+- **Diagnosis:** 1.67 / 5.1 is almost exactly one third — precisely the inverse of
+  the two thirds expected. The divider formula depends on the *bottom* resistor, so
+  an output of one third means the bottom resistor is the 1k rather than the 2k.
+- **Solution:** swapped the two, and explicitly re-measured the top resistor on its
+  own before reconnecting power.
+- **Why the earlier measurements did not catch it — the main point of this fault:**
+  addition is commutative. Two resistors in series sum to the same value in either
+  order, so the level 1 consistency test is blind to which one is which.
+  **A resistance measurement proves the circuit is complete. Only a voltage
+  measurement proves it is correct.** The two answer different questions and one
+  does not substitute for the other.
+
+**Fault 3 — TRIG on the wrong pin**
+
+- **Symptom:** with everything wired and the code running, every sample returned
+  `echo=0us`, for hundreds of consecutive lines, including with the sensor aimed
+  squarely at a wall.
+- **Diagnosis:** a total failure rather than a partial one points at wiring or
+  protocol, not at environmental conditions. An angled surface or an absorbing
+  material would have produced intermittent failures, not an unbroken run of zeros.
+  The TRIG wire was connected to a pin other than the one the code drives.
+- **Mechanism:** without TRIG the sensor is never told to measure. It is powered and
+  healthy but never transmits, so the ECHO line stays low and `pulseIn` reaches its
+  timeout on every call.
+- **Solution:** moved TRIG to the pin in the wiring contract. The exact wrong pin
+  was not written down at the time, so it is not recorded here.
+- **Method note:** this is the same root cause as the pin-map fault in session 4 —
+  a gap between what the code assumes and what is physically wired. There the
+  source was a pin map written from the chip's datasheet rather than from the board.
+
+**A misdiagnosis caught before it was implemented**
+
+This one is recorded separately from the faults above because nothing was fixed —
+the diagnosis was wrong and the fix was never applied.
+
+- **What was seen:** once the sensor started returning distances, an early log held
+  long runs of readings near 10,000 microseconds, converting to about 172 cm.
+- **The hypothesis:** that 172 cm was the `pulseIn` timeout being reported as a
+  valid distance. An instruction was drafted to reject any reading above a ceiling
+  derived from the timeout.
+- **What disproved it — two checks:** a second log contained valid readings passing
+  freely through 172 cm and up to 237 cm; if 172 had been a ceiling, nothing could
+  have crossed it. And aiming the sensor at open space printed the "no reading"
+  marker as intended, confirming the existing timeout handling was already correct.
+  The locked run was an accurate measurement of a wall that was genuinely there.
+- **Where the reasoning went wrong:** the argument was that a real distance
+  fluctuates, so a locked run is suspicious. In fact the consistency was evidence of
+  measurement *quality*, and it was read as evidence of failure. The question that
+  settled it — what was actually in front of the sensor — was never asked before the
+  diagnosis was written.
+- **What the near-miss would have cost:** rejecting readings above an upper
+  threshold would have deleted real obstacles at long range. For an AEB system that
+  is the worst direction to fail in: an obstacle that goes unreported.
+- **Method note**, alongside the line already in session 5 that a fix which works is
+  not evidence that the explanation for it is correct: a diagnosis that sounds
+  convincing is not a diagnosis that has been tested. The check that settled this
+  one took under a minute and had been available from the start.
+
+### Sensor characterisation
+
+Measured for use when the AEB thresholds are designed in phase 5.
+
+- **Noise floor is very low.** On stable runs against a fixed target, consecutive
+  readings moved within less than a tenth of a percent — for example 209.5 to
+  209.8 cm.
+- **Continuous motion is tracked faithfully.** Moving a target showed gradual
+  progression from about 20 cm out to about 237 cm and back, with no jumps.
+
+Physical limits that constrain the thresholds. These are properties of ultrasound,
+not faults in the part:
+
+| Limit | Effect |
+|---|---|
+| Below about 2 cm | Unreliable — the transmitter is still ringing when the echo returns |
+| Surface angled more than about 15° | The wave reflects away from the receiver rather than back to it |
+| Soft materials (cloth, foam) | Absorb ultrasound and may return no echo at all |
+| Beam lobe about 15° | A narrow object at long range can be missed entirely |
+
+**For AEB design:** the STOP threshold has to sit well above 2 cm — not only for
+braking distance, but because below that the sensor is blind.
+
+### Decisions & rationale
+
+- **The divider intercepts the signal rather than lowering the supply.** The supply
+  cannot be lowered here: the ultrasonic transmitter needs 5 V to produce a strong
+  enough wave. So the 5 V stays and the signal is divided on its way to the pin.
+- **The opposite decision was taken for the line sensors, from the same principle.**
+  There the modules were deliberately fed 3.3 V rather than 5 V, because the AO
+  output cannot exceed its own supply — which removed the need for a divider
+  entirely. Same rule, two opposite choices, decided by what each part allows.
+- **1k and 2k specifically.** The division ratio depends on the ratio between the
+  resistors, not their absolute values, but the order of magnitude is not arbitrary.
+  Too small and the current through the divider rises and loads the ECHO output.
+  Too large and stray capacitance slows the edges of the pulse — which matters more
+  here than in most dividers, because `pulseIn` measures the *width* of that pulse
+  and the width is the distance. A smeared edge is a wrong distance. High impedance
+  is also more susceptible to picked-up noise, which becomes a real consideration
+  near motors and PWM in the phases ahead.
+- **Verify at three levels before connecting, not after.** A destroyed GPIO cannot
+  be undone, and this board has no spare pins left. The cost of the three
+  measurements is a few minutes; the cost of skipping them is the board.
+- **No median filter yet.** The project convention requires one on this sensor, and
+  it will be added. It is deliberately absent at this stage so the raw noise can be
+  measured first — the filter should be designed against real numbers rather than
+  guessed at ahead of them.
+
+### Open risk — loop timing
+
+Recorded here for the first time, to be dealt with in phase 7.
+
+`pulseIn` is a blocking call: while it waits for the pulse, the rest of the loop
+stops. With the timeout it can hold for tens of milliseconds. The line sensors
+have a smaller version of the same problem — their 16-sample averaging burst
+blocks for roughly 2.4 ms per read.
+
+The planned median filter makes the ultrasonic case worse, not better: it triples
+the number of samples and adds a gap between them, so it multiplies the blocking
+time. That trade is being accepted knowingly — protection against single missed
+echoes on a moving, vibrating vehicle matters more than the timing budget does at
+bench stage.
+
+In phase 7, with every subsystem sharing one loop, this may have to become a
+non-blocking interrupt-driven measurement, or the samples may have to be spread
+across several loop passes.
+
+### Next up
+The OLED once its header is soldered — its controller chip and resolution are both
+still unconfirmed.
