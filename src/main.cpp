@@ -3,8 +3,10 @@
 // Phase 1 — brake light on PWM, status LED and mode button.
 // Phase 2 — two line sensors on GPIO 34 and 35, read and reported together with
 // the difference between them. Their reference values have been measured on the
-// bench; see the comment beside the pin definitions. Still data collection only:
-// there are no thresholds and no decisions in this file yet.
+// bench; see the comment beside the pin definitions. Phase 2 also brings up the
+// HC-SR04 on GPIO 5 and 18, which reports the raw echo pulse next to the
+// distance it converts to. Still data collection only: there are no thresholds
+// and no decisions in this file yet.
 // Pins follow the wiring contract in README.md. GPIO 16/17 from the original
 // plan are not broken out on this 30-pin board, so the brake light is on 19
 // and the status LED on 13.
@@ -37,6 +39,31 @@ constexpr uint8_t PIN_MODE_BUTTON = 23;
 // its own correction factor.
 constexpr uint8_t PIN_LINE_SENSOR_LEFT = 34;
 constexpr uint8_t PIN_LINE_SENSOR_RIGHT = 35;
+
+// The HC-SR04 is a 5 V part, fed here from VIN at 5.1 V, so its ECHO line swings
+// to that level. GPIO 18 is not 5 V tolerant, so ECHO arrives through a 1k/2k
+// divider, measured at 3.42 V for a 5.1 V pulse. TRIG needs no divider in the
+// other direction: the module reads a 3.3 V output as HIGH.
+constexpr uint8_t PIN_ULTRASONIC_TRIG = 5;
+constexpr uint8_t PIN_ULTRASONIC_ECHO = 18;
+
+// --- Ultrasonic timing ---
+// A measurement starts with a 10 us HIGH pulse on TRIG, which is what the module
+// listens for. The short LOW in front of it puts the line at a known level first,
+// so the module sees one clean rising edge rather than one riding on whatever
+// the pin was already doing.
+constexpr unsigned long TRIG_SETTLE_US = 2;
+constexpr unsigned long TRIG_PULSE_US = 10;
+
+// pulseIn defaults to a one-second timeout, which would freeze the loop for a
+// full second every time an echo goes missing. The module is rated to 400 cm,
+// and sound covers that out and back in about 23.3 ms, so 25 ms spans the whole
+// usable range while still giving up quickly when nothing comes back.
+constexpr unsigned long ECHO_TIMEOUT_US = 25000;
+
+// Speed of sound at room temperature — 343 m/s, written in the units the echo is
+// actually measured in.
+constexpr float SOUND_SPEED_CM_PER_US = 0.0343f;
 
 // --- ADC ---
 // 12 bits gives a 0-4095 range, and ADC_11db widens the input range so the whole
@@ -74,6 +101,7 @@ constexpr uint32_t PWM_MAX_DUTY =
 // --- Timing ---
 constexpr unsigned long BRAKE_STEP_INTERVAL_MS = 1000;
 constexpr unsigned long LINE_PRINT_INTERVAL_MS = 200;
+constexpr unsigned long DISTANCE_READ_INTERVAL_MS = 100;
 
 // Chosen to sit above the 1-20 ms a tactile switch typically bounces for, and
 // below the 100-150 ms gap between even fast human presses, so genuine presses
@@ -99,6 +127,7 @@ bool lastButtonPressed = false;
 unsigned long lastButtonChange = 0;
 
 unsigned long lastLinePrint = 0;
+unsigned long lastDistanceRead = 0;
 
 // Percentages are the readable unit; the hardware wants raw counts.
 static uint32_t dutyFromPercent(uint8_t percent) {
@@ -126,6 +155,30 @@ static uint16_t readLineAveraged(uint8_t pin) {
   return static_cast<uint16_t>(total / LINE_SENSOR_SAMPLES);
 }
 
+// Runs one measurement and returns the width of the ECHO pulse in microseconds,
+// or 0 when nothing came back before the timeout.
+//
+// delayMicroseconds appears here and nowhere else in the file. It is not a
+// scheduling delay: the 10 us pulse *is* the signal the module waits for, and
+// holding the line is the only way to produce it. At 10 us the cost is far below
+// anything the loop can notice.
+static unsigned long readEchoDuration() {
+  digitalWrite(PIN_ULTRASONIC_TRIG, LOW);
+  delayMicroseconds(TRIG_SETTLE_US);
+
+  digitalWrite(PIN_ULTRASONIC_TRIG, HIGH);
+  delayMicroseconds(TRIG_PULSE_US);
+  digitalWrite(PIN_ULTRASONIC_TRIG, LOW);
+
+  return pulseIn(PIN_ULTRASONIC_ECHO, HIGH, ECHO_TIMEOUT_US);
+}
+
+// The pulse times a round trip: the burst travels out to the obstacle and back
+// again, so the distance to the obstacle is half of what the sound covered.
+static float distanceFromDuration(unsigned long durationUs) {
+  return (durationUs * SOUND_SPEED_CM_PER_US) / 2.0f;
+}
+
 void setup() {
   Serial.begin(SERIAL_BAUD);
 
@@ -144,6 +197,12 @@ void setup() {
   // closing it drags the pin down and a press reads LOW. That internal resistor
   // is why no external one is wired.
   pinMode(PIN_MODE_BUTTON, INPUT_PULLUP);
+
+  // TRIG is driven by us, ECHO is read. Parking TRIG LOW here means the module
+  // is not looking at a half-raised line before the first measurement runs.
+  pinMode(PIN_ULTRASONIC_TRIG, OUTPUT);
+  digitalWrite(PIN_ULTRASONIC_TRIG, LOW);
+  pinMode(PIN_ULTRASONIC_ECHO, INPUT);
 
   analogReadResolution(ADC_RESOLUTION_BITS);
   analogSetPinAttenuation(PIN_LINE_SENSOR_LEFT, ADC_11db);
@@ -197,5 +256,32 @@ void loop() {
     Serial.print(right);
     Serial.print("  delta=");
     Serial.println(delta);
+  }
+
+  // Deliberately unfiltered. The project convention calls for a median filter on
+  // this sensor, but the point of this bench pass is to see how noisy the raw
+  // signal actually is — the filter gets designed against measured noise, not
+  // guessed at ahead of it.
+  if (now - lastDistanceRead >= DISTANCE_READ_INTERVAL_MS) {
+    lastDistanceRead = now;
+
+    // Both values get printed: the raw pulse says whether a bad number came from
+    // the sensor or from the conversion below it.
+    const unsigned long echoDuration = readEchoDuration();
+
+    Serial.print("DIST  echo=");
+    Serial.print(echoDuration);
+    Serial.print("us  ");
+
+    // A timeout is not a distance. Converting the 0 would print 0.0 cm, which
+    // reads exactly like an obstacle pressed against the sensor — the most
+    // dangerous possible misreading once this drives the brakes.
+    if (echoDuration == 0) {
+      Serial.println("d=--  no echo");
+    } else {
+      Serial.print("d=");
+      Serial.print(distanceFromDuration(echoDuration), 1);
+      Serial.println("cm");
+    }
   }
 }
