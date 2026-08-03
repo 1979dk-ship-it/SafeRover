@@ -929,6 +929,21 @@ unknown rather than guessed at.
 | `phase2-oled-ribbon-lifted.jpg` | The same module with no pressure applied and the screen dark. The flexible ribbon at the far end is visible with its gold contacts exposed and the adhesive around them crumpled — the fault itself |
 | `phase2-oled-debug-bench.jpg` | The bench during the session: the breadboard with all of phase 2 wired, the multimeter with its probes out, and the board still connected |
 
+### Known, not investigated — an ADC warning at every boot
+
+Two errors print from the core on every start:
+`__analogChannelConfig(): Pin is not configured as analog channel`. They arrive at
+17 ms and 26 ms, before the firmware prints its own boot line, so they come from
+the core's setup path rather than from anything the loop does. Two errors, two
+line sensor pins.
+
+No effect on the result: the sensors were checked over white and over black at the
+working height and returned the values recorded in session 7. So the warning is
+harmless as far as anything measured so far shows — but why it prints has not been
+looked into, and those are two different statements. An error that reports
+something is not the same as no error at all, and the distinction is easy to lose
+once a message has been seen enough times to stop registering.
+
 ### Next up
 Phase 3 — chassis assembly, motor wiring and the first driving test. The display
 returns when the replacement module arrives.
