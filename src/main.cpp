@@ -4,9 +4,9 @@
 // Phase 2 — two line sensors on GPIO 34 and 35, read and reported together with
 // the difference between them. Their reference values have been measured on the
 // bench; see the comment beside the pin definitions. Phase 2 also brings up the
-// HC-SR04 on GPIO 5 and 18, which reports the raw echo pulse next to the
-// distance it converts to. Still data collection only: there are no thresholds
-// and no decisions in this file yet.
+// HC-SR04 on GPIO 5 and 18, which reports the echo pulse next to the distance it
+// converts to, median-filtered over three samples. Still data collection only:
+// there are no thresholds and no driving decisions in this file yet.
 // Pins follow the wiring contract in README.md. GPIO 16/17 from the original
 // plan are not broken out on this 30-pin board, so the brake light is on 19
 // and the status LED on 13.
@@ -40,18 +40,18 @@ constexpr uint8_t PIN_MODE_BUTTON = 23;
 constexpr uint8_t PIN_LINE_SENSOR_LEFT = 34;
 constexpr uint8_t PIN_LINE_SENSOR_RIGHT = 35;
 
-// The HC-SR04 is a 5 V part, fed here from VIN at 5.1 V, so its ECHO line swings
-// to that level. GPIO 18 is not 5 V tolerant, so ECHO arrives through a 1k/2k
-// divider, measured at 3.42 V for a 5.1 V pulse. TRIG needs no divider in the
-// other direction: the module reads a 3.3 V output as HIGH.
+// The HC-SR04 is a 5 V part, fed here from VIN at 5.1 V, so its ECHO line
+// swings to that level. GPIO 18 is not 5 V tolerant, so ECHO arrives through a
+// 1k/2k divider, measured at 3.42 V for a 5.1 V pulse. TRIG needs no divider in
+// the other direction: the module reads a 3.3 V output as HIGH.
 constexpr uint8_t PIN_ULTRASONIC_TRIG = 5;
 constexpr uint8_t PIN_ULTRASONIC_ECHO = 18;
 
 // --- Ultrasonic timing ---
-// A measurement starts with a 10 us HIGH pulse on TRIG, which is what the module
-// listens for. The short LOW in front of it puts the line at a known level first,
-// so the module sees one clean rising edge rather than one riding on whatever
-// the pin was already doing.
+// A measurement starts with a 10 us HIGH pulse on TRIG, which is what the
+// module listens for. The short LOW in front of it puts the line at a known
+// level first, so the module sees one clean rising edge rather than one riding
+// on whatever the pin was already doing.
 constexpr unsigned long TRIG_SETTLE_US = 2;
 constexpr unsigned long TRIG_PULSE_US = 10;
 
@@ -61,13 +61,31 @@ constexpr unsigned long TRIG_PULSE_US = 10;
 // usable range while still giving up quickly when nothing comes back.
 constexpr unsigned long ECHO_TIMEOUT_US = 25000;
 
-// Speed of sound at room temperature — 343 m/s, written in the units the echo is
-// actually measured in.
+// Speed of sound at room temperature — 343 m/s, written in the units the echo
+// is actually measured in.
 constexpr float SOUND_SPEED_CM_PER_US = 0.0343f;
 
+// --- Ultrasonic filtering ---
+// Each measurement takes three samples and keeps the middle one. A median rather
+// than an average, because the two fail differently: an average is dragged toward
+// a bad sample in proportion to how bad it is, while a median steps over it — one
+// wild value out of three cannot end up in the middle. That distinction matters
+// because ultrasonic errors have exactly that shape. A missed echo, or one picked
+// up off a wall at an angle, lands far from the truth rather than slightly off
+// it, so a single one visibly moves an average and does not move a median at all.
+constexpr uint8_t DISTANCE_SAMPLES = 3;
+
+// How many of those samples have to come back with an echo before the result
+// counts as a measurement at all.
+constexpr uint8_t DISTANCE_MIN_VALID_SAMPLES = 2;
+
+// The bursts need spacing, or the next measurement hears the tail of the previous
+// one still bouncing around the room and reads it as a much closer object.
+constexpr unsigned long SAMPLE_SPACING_MS = 5;
+
 // --- ADC ---
-// 12 bits gives a 0-4095 range, and ADC_11db widens the input range so the whole
-// 0-3.3 V the sensor can put out is measurable.
+// 12 bits gives a 0-4095 range, and ADC_11db widens the input range so the
+// whole 0-3.3 V the sensor can put out is measurable.
 constexpr uint8_t ADC_RESOLUTION_BITS = 12;
 
 // The ADC is noisy: repeated reads of a steady voltage still differ by tens of
@@ -86,8 +104,8 @@ constexpr uint8_t LINE_SENSOR_SAMPLES = 16;
 // their own, so they are reserved here on channels that sit on separate timers.
 // Declared before the L298N is wired so the allocation cannot be taken by
 // accident later.
-constexpr uint8_t PWM_CHANNEL_BRAKE = 0;                      // timer 0
-[[maybe_unused]] constexpr uint8_t PWM_CHANNEL_MOTOR_LEFT = 2; // timer 1, ENA
+constexpr uint8_t PWM_CHANNEL_BRAKE = 0;                        // timer 0
+[[maybe_unused]] constexpr uint8_t PWM_CHANNEL_MOTOR_LEFT = 2;  // timer 1, ENA
 [[maybe_unused]] constexpr uint8_t PWM_CHANNEL_MOTOR_RIGHT = 4; // timer 2, ENB
 // 5 kHz is far above the rate the eye can follow, so the light looks steady
 // rather than flickering. 8 bits gives 256 steps, which is finer than anything
@@ -160,8 +178,8 @@ static uint16_t readLineAveraged(uint8_t pin) {
 //
 // delayMicroseconds appears here and nowhere else in the file. It is not a
 // scheduling delay: the 10 us pulse *is* the signal the module waits for, and
-// holding the line is the only way to produce it. At 10 us the cost is far below
-// anything the loop can notice.
+// holding the line is the only way to produce it. At 10 us the cost is far
+// below anything the loop can notice.
 static unsigned long readEchoDuration() {
   digitalWrite(PIN_ULTRASONIC_TRIG, LOW);
   delayMicroseconds(TRIG_SETTLE_US);
@@ -171,6 +189,63 @@ static unsigned long readEchoDuration() {
   digitalWrite(PIN_ULTRASONIC_TRIG, LOW);
 
   return pulseIn(PIN_ULTRASONIC_ECHO, HIGH, ECHO_TIMEOUT_US);
+}
+
+// Takes DISTANCE_SAMPLES measurements and returns the median of the ones that
+// came back, or 0 when too few of them did.
+//
+// The delay between samples is part of the measuring protocol, in the same sense
+// as the microsecond delays inside the trigger pulse: a burst fired before the
+// previous one has died away measures the old echo, not the new one.
+static unsigned long readEchoMedian() {
+  unsigned long valid[DISTANCE_SAMPLES];
+  uint8_t validCount = 0;
+
+  for (uint8_t i = 0; i < DISTANCE_SAMPLES; i++) {
+    if (i > 0) {
+      delay(SAMPLE_SPACING_MS);
+    }
+
+    const unsigned long sample = readEchoDuration();
+
+    // A timeout carries no distance, so it is dropped rather than sorted with
+    // the rest — a 0 would sink to the bottom and drag the median down with it.
+    if (sample != 0) {
+      valid[validCount++] = sample;
+    }
+  }
+
+  // With most of the samples gone, reporting a distance from the one that
+  // survived would be a guess presented as a measurement. A safety system is
+  // better off declaring that it has no information than stating a wrong value
+  // confidently — the caller already knows how to handle "no reading", and the
+  // existing 0 return is exactly that signal.
+  if (validCount < DISTANCE_MIN_VALID_SAMPLES) {
+    return 0;
+  }
+
+  // Never more than three elements, so a plain insertion sort is the clearest
+  // thing that works; anything cleverer would cost readability for no gain.
+  for (uint8_t i = 1; i < validCount; i++) {
+    const unsigned long key = valid[i];
+    uint8_t j = i;
+
+    while (j > 0 && valid[j - 1] > key) {
+      valid[j] = valid[j - 1];
+      j--;
+    }
+
+    valid[j] = key;
+  }
+
+  // An odd count has a real middle. An even one does not, and the tie-break here
+  // is the lower of the two: averaging them would let a bad sample pull the
+  // result, which is the whole thing the median was chosen to avoid, and of two
+  // candidate distances the nearer one is the safe one for a brake to act on.
+  const uint8_t medianIndex =
+      (validCount % 2 == 1) ? (validCount / 2) : (validCount / 2 - 1);
+
+  return valid[medianIndex];
 }
 
 // The pulse times a round trip: the burst travels out to the obstacle and back
@@ -258,16 +333,17 @@ void loop() {
     Serial.println(delta);
   }
 
-  // Deliberately unfiltered. The project convention calls for a median filter on
-  // this sensor, but the point of this bench pass is to see how noisy the raw
-  // signal actually is — the filter gets designed against measured noise, not
-  // guessed at ahead of it.
+  // Median-filtered now that the raw noise has been characterised on the bench:
+  // the unfiltered signal was steady to within a tenth of a percent against a
+  // fixed target, so the filter is not there to smooth a wobble. It is there for
+  // the occasional sample that comes back badly wrong, which is what a moving,
+  // vibrating vehicle will produce.
   if (now - lastDistanceRead >= DISTANCE_READ_INTERVAL_MS) {
     lastDistanceRead = now;
 
-    // Both values get printed: the raw pulse says whether a bad number came from
-    // the sensor or from the conversion below it.
-    const unsigned long echoDuration = readEchoDuration();
+    // Both values get printed: the pulse says whether a bad number came from the
+    // sensor or from the conversion below it.
+    const unsigned long echoDuration = readEchoMedian();
 
     Serial.print("DIST  echo=");
     Serial.print(echoDuration);
