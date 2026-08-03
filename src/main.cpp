@@ -1,4 +1,7 @@
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
 #include <Arduino.h>
+#include <Wire.h>
 
 // Phase 1 — brake light on PWM, status LED and mode button.
 // Phase 2 — two line sensors on GPIO 34 and 35, read and reported together with
@@ -64,6 +67,44 @@ constexpr unsigned long ECHO_TIMEOUT_US = 25000;
 // Speed of sound at room temperature — 343 m/s, written in the units the echo
 // is actually measured in.
 constexpr float SOUND_SPEED_CM_PER_US = 0.0343f;
+
+// --- OLED (I2C) ---
+// The ESP32 can put I2C on almost any pin, so the pair is named rather than
+// left to the core's default.
+constexpr uint8_t PIN_I2C_SDA = 21;
+constexpr uint8_t PIN_I2C_SCL = 22;
+
+// Confirmed by the bus scanner in tools/i2c_scanner rather than assumed: it
+// reported exactly one device, at this address.
+constexpr uint8_t OLED_ADDRESS = 0x3C;
+
+// A 0.91" panel is 128x32. Getting this wrong does not fail loudly — the
+// library still draws, into a buffer the wrong shape — so the test screen below
+// puts a border on the outer pixels to make a mismatch visible at a glance.
+constexpr uint8_t OLED_WIDTH = 128;
+constexpr uint8_t OLED_HEIGHT = 32;
+
+// The library raises the bus to 400 kHz while it transfers and drops it back
+// afterwards. The scanner in tools/ talks to this same panel at the core's
+// default 100 kHz and finds it every single time, so 400 kHz is the one thing
+// that differs between the case that works and the case that does not. Long
+// breadboard jumpers with no external pull-ups add stray capacitance, which
+// rounds off the signal edges; at 100 kHz there is time for them to settle, at
+// 400 kHz there is not, and the controller receives corrupted commands.
+constexpr uint32_t I2C_CLOCK_HZ = 100000UL;
+
+// Text layout for the test screen, inset far enough to clear the border.
+constexpr int16_t OLED_TEXT_LEFT = 4;
+constexpr int16_t OLED_TEXT_TOP = 4;
+constexpr int16_t OLED_LINE_SPACING = 9;
+
+// -1 says there is no reset pin: this module has four pins and exposes none.
+constexpr int8_t OLED_RESET_PIN = -1;
+
+// The last two arguments are the bus speed during a transfer and after it. Both
+// are pinned to the same value so nothing switches the bus behind our back.
+Adafruit_SSD1306 display(OLED_WIDTH, OLED_HEIGHT, &Wire, OLED_RESET_PIN,
+                         I2C_CLOCK_HZ, I2C_CLOCK_HZ);
 
 // --- Ultrasonic filtering ---
 // Each measurement takes three samples and keeps the middle one. A median rather
@@ -254,6 +295,44 @@ static float distanceFromDuration(unsigned long durationUs) {
   return (durationUs * SOUND_SPEED_CM_PER_US) / 2.0f;
 }
 
+// Draws the one-off screen that proves the panel works and that the configured
+// resolution matches the physical one.
+//
+// Every call below writes into a pixel buffer held in the ESP32's own RAM —
+// nothing reaches the panel until display() pushes that whole buffer out over
+// I2C. display() is therefore the expensive operation, and the only one whose
+// cost scales with the bus rather than the CPU. In the finished firmware it gets
+// called when the content actually changes, never once per loop pass.
+static void showTestScreen() {
+  display.clearDisplay();
+
+  constexpr uint16_t FOREGROUND = SSD1306_WHITE;
+
+  // The border is the resolution test. It sits on the outermost pixels on all
+  // four sides, so if the panel is really a different size the frame will not
+  // line up with its physical edges — cropped, or floating short of them. Text
+  // alone would still look plausible on a wrongly sized buffer.
+  display.drawRect(0, 0, OLED_WIDTH, OLED_HEIGHT, FOREGROUND);
+
+  display.setTextSize(1);
+  display.setTextColor(FOREGROUND);
+
+  display.setCursor(OLED_TEXT_LEFT, OLED_TEXT_TOP);
+  display.print("SafeRover");
+
+  display.setCursor(OLED_TEXT_LEFT, OLED_TEXT_TOP + OLED_LINE_SPACING);
+  display.print("phase 2 - bench");
+
+  // The configured resolution is printed as well as drawn. If the border looks
+  // wrong, this says what the firmware believed the panel was.
+  display.setCursor(OLED_TEXT_LEFT, OLED_TEXT_TOP + 2 * OLED_LINE_SPACING);
+  display.print(OLED_WIDTH);
+  display.print("x");
+  display.print(OLED_HEIGHT);
+
+  display.display();
+}
+
 void setup() {
   Serial.begin(SERIAL_BAUD);
 
@@ -282,6 +361,26 @@ void setup() {
   analogReadResolution(ADC_RESOLUTION_BITS);
   analogSetPinAttenuation(PIN_LINE_SENSOR_LEFT, ADC_11db);
   analogSetPinAttenuation(PIN_LINE_SENSOR_RIGHT, ADC_11db);
+
+  // The bus is opened here, with the pins named, rather than left to the
+  // library. The last argument tells begin() not to call Wire.begin() itself:
+  // it would re-open the bus on the core's default pins, which would only work
+  // by coincidence.
+  Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
+
+  // begin() returns false when the panel does not answer. Checking it turns a
+  // silent dead screen into a named fault — an unchecked init failure and a
+  // display that simply never lit look identical from the outside, and that is
+  // one unknown too many. A failure here is reported and then let go: the rover
+  // keeps running without its screen rather than stopping dead.
+  if (display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDRESS, true, false)) {
+    showTestScreen();
+  } else {
+    Serial.print("OLED init FAILED at 0x");
+    Serial.println(OLED_ADDRESS, HEX);
+    Serial.println("bus answered during the scan, so suspect the controller "
+                   "chip - try Adafruit_SH110X");
+  }
 
   Serial.print("SafeRover boot OK - brake light PWM on GPIO ");
   Serial.println(PIN_BRAKE_LIGHT);
