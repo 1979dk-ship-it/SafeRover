@@ -687,3 +687,82 @@ across several loop passes.
 ### Next up
 The OLED once its header is soldered — its controller chip and resolution are both
 still unconfirmed.
+
+---
+
+## Session 9 — 2026-08-03 — Median filter on the distance reading
+
+### Goal
+Protect the distance reading from single bad samples, before anything that brakes
+is allowed to trust it.
+
+### What was done
+- Moved the read from one sample per measurement to three consecutive samples,
+  returning the middle one.
+- Added the rule for what happens when samples fail, and verified the change.
+
+Two checks were run afterwards. Readings against a fixed target stayed stable. And
+as a regression check, aiming the sensor at open space still printed the "no
+reading" marker, which confirms the filter did not disturb the timeout handling
+that was already working.
+
+### Problems & challenges
+None. The change built and behaved correctly the first time.
+
+### Decisions & rationale
+
+- **A median rather than an average.** An average is pulled toward an outlier in
+  proportion to how far out that outlier is, and it produces a number that no
+  sample actually measured. A median ignores the extremes outright, so a single
+  wild value simply disappears. The filter is aimed at one bad jump, not at
+  continuous noise.
+
+- **The honest reason it was added.** The noise measured on the bench was very low
+  — under a tenth of a percent across stable runs against a fixed target. This
+  filter is therefore *not* a response to measured noise. It is protection
+  prepared in advance for conditions the bench cannot reproduce: vibration,
+  surface angles that change while the rover is moving, and obstacles crossing in
+  and out of the beam lobe. Single missed echoes are expected there. That is worth
+  writing down plainly rather than presenting the filter as something a
+  measurement demanded.
+
+- **Two of the three samples must return an echo, or the result is "no reading".**
+  When most of the samples fail, the likely truth is that the target genuinely
+  returns no echo — an absorbing surface, too sharp an angle, or no obstacle at
+  all. Reporting a distance on the strength of the one sample that survived would
+  be a guess presented as a measurement. A safety system is better off declaring
+  that it has no information than stating a wrong value confidently. This is the
+  same principle recorded in session 8, in the misdiagnosis caught before it was
+  implemented: a timeout means "no information", never "a large distance".
+
+- **The timing cost, accepted knowingly.** `pulseIn` blocks. It waits in a loop
+  for the pulse to start and then for it to end, and nothing else runs for that
+  whole time. How long it waits depends on the distance, because the pulse *is*
+  the measurement — a near obstacle gives a short pulse, a far one a long pulse.
+  The worst case is when there is no echo at all: the pulse never starts and the
+  function waits out the full timeout. The system spends the most time exactly
+  when there is nothing to see.
+
+  Tripling the samples and adding a gap between them multiplies that blocking time
+  accordingly. By construction the worst case goes from about 25 ms to about
+  85 ms — three timeouts plus two gaps — against a 100 ms measurement interval.
+  These are derived from the constants, not measured. The trade was made
+  deliberately: a wrong reading is more dangerous than a late one. A single spike
+  in an AEB system means either braking for nothing in mid-drive, or an obstacle
+  that vanishes for a moment while the system fails to stop.
+
+- **Left blocking for now, on purpose.** The alternative is a non-blocking
+  interrupt-driven measurement — recording timestamps when the pin changes state,
+  so the processor keeps working between the start and the end of the pulse. That
+  is not being done yet, because the simple implementation should be proven to
+  work before it is optimised, and the optimisation should be driven by a
+  measurement rather than by an estimate.
+
+### Open risk carried into phase 7
+In a unified loop, this blocking time adds to the blocking already noted for the
+line sensor sampling burst. Both are recorded under the open timing risk in
+session 8; this entry only makes the ultrasonic side larger.
+
+### Next up
+The OLED once its header is soldered — its controller chip and resolution are both
+still unconfirmed.
