@@ -766,3 +766,169 @@ session 8; this entry only makes the ultrasonic side larger.
 ### Next up
 The OLED once its header is soldered — its controller chip and resolution are both
 still unconfirmed.
+
+---
+
+## Session 10 — 2026-08-03 — OLED bring-up, and a display that cannot be repaired
+
+### Goal
+Bring the 0.91" I2C OLED up on the bench and get a test screen onto it.
+
+### What was done
+- Built an I2C bus scanner as a **separate PlatformIO environment** under
+  `tools/i2c_scanner/`, kept out of `src/` so it never shares a `setup()` with
+  the firmware and is never compiled into the vehicle. A plain `pio run` still
+  builds only the rover firmware; the scanner is flashed on request with
+  `pio run -e i2c-scanner -t upload`.
+- Ran it: one device found, at address `0x3C`. Three runs, three hits.
+- Added the display code to the firmware — `Adafruit_SSD1306` at 128x32, with the
+  address the scanner reported rather than one taken from a datasheet.
+
+**Why the test screen has a border.** It draws a rectangle on the outermost pixel
+row and column of all four sides, deliberately. Text on its own still looks
+plausible when the pixel buffer is the wrong shape, so a wrong resolution can pass
+unnoticed. A frame that does not line up with the physical edges of the glass
+gives it away immediately.
+
+### Problems & challenges
+
+**Fault 1 — the panel never rendered**
+
+- **Symptom:** depending on the upload, either faint light at the edges of the
+  glass or a single thin lit band close to the pin header. Never the test screen.
+
+- **Ruled out — wrong resolution.** Changed the configured height from 32 to 64.
+  This is not a cosmetic setting: it decides which COM pin mapping the library
+  sends to the controller, so a wrong value scrambles which buffer row reaches
+  which physical row rather than simply cropping the image. No change at all.
+
+- **Ruled out — bus speed.** The library raises the bus to 400 kHz while it
+  transfers. The scanner talks to the same panel at the core's default 100 kHz and
+  succeeds every time, which made speed the one difference between the case that
+  worked and the case that did not. Pinned the bus to 100 kHz. No change.
+
+- **Ruled out — wrong controller chip.** The plan had been to fall back to
+  `Adafruit_SH110X` if `Adafruit_SSD1306` came up blank. The PCB silkscreen reads
+  `0.91 OLED`, and a 0.91" panel is 128x32 and is almost always an SSD1306;
+  SH1106 is typically the 1.3" 128x64 module. The library switch was abandoned on
+  that evidence rather than tried blind.
+
+- **Ruled out — insufficient supply.** Multimeter on DC volts: 3.2 V on the 3.3 V
+  rail, and 3.2 V measured at the module's own VCC leg rather than only at the
+  rail.
+
+- **Ruled out — a loose signal wire or a cold joint on SDA or SCL.** The scanner
+  was re-run three times back to back and found the device on all three. An
+  intermittent line would have produced at least one miss.
+
+- **A test that was wrong, and why.** A full-screen white fill was used to try to
+  take text and layout out of the question and show only which pixels the
+  controller lights. On an OLED that is the wrong test. OLED pixels emit their own
+  light and there is no backlight, so current draw scales with the number of lit
+  pixels: a fully white screen is the maximum-current case, not a baseline. The
+  test introduced a new variable while trying to isolate a different one, and its
+  result — a completely black screen — pushed the diagnosis sideways for a while.
+
+- **The caveat that follows from it.** The 3.2 V readings were taken while the
+  panel was dark, which is to say under almost no load. A high-resistance
+  connection drops voltage in proportion to current, so it measures perfectly fine
+  when nothing is drawing through it. Those readings therefore do not fully
+  exclude a resistive connection. Resistance proves a circuit is complete, voltage
+  proves it is correct, and only voltage under load proves it can carry the
+  current — the third step, on top of the two recorded in session 8.
+
+- **A test prepared but overtaken.** An `invertDisplay` call was added to send one
+  command and no pixel data, to separate the command path from the data path. Its
+  result was never observed, because the finger-pressure discovery came first. It
+  was removed again without being committed.
+
+- **The actual fault.** Pressing a finger on the far end of the module — the glass
+  end, away from the pin header — makes the display work and render legible text.
+  Releasing the pressure returns it to the thin band. Photographs of that end show
+  the flexible ribbon with its gold contacts exposed and lifted, and the adhesive
+  around it crumpled.
+
+- **Diagnosis:** the bond between the controller's flex ribbon and the OLED glass
+  has failed. That bond is not solder. It is made in the factory with a conductive
+  adhesive containing metal particles, pressed under heat: the particles are
+  crushed and conduct only where the pressure was applied, and the cured adhesive
+  holds that pressure permanently. **The pressure is the electrical connection.**
+  With the adhesive lifted, only some of the dozens of parallel conductors in the
+  ribbon still touch. Each conductor feeds a group of rows on the glass, so only
+  those rows light — which is exactly the thin band, and pressing by hand restores
+  enough contacts to show the screen.
+
+- **Solution:** none available. See "no home repair" below. A replacement module
+  has been ordered.
+
+### The finding that did not fit, and why it mattered
+
+The one result that suited no hypothesis was that the I2C scan succeeded three
+times out of three while the display failed completely. Every explanation that was
+tried had to work around it.
+
+In the end it was the thing that explained everything. VCC, GND, SDA and SCL
+happen to sit on ribbon conductors that are still bonded, so the controller
+receives everything it needs and acknowledges its address exactly as a healthy
+part would. It simply cannot get the result out to the glass. The scanner and the
+display were asking different things of the same connector, and only one of those
+things was still possible.
+
+**A result that contradicts the hypothesis is not noise to be worked around. It is
+often the key.** That sits alongside what session 5 already records — that a fix
+which works is not evidence that the explanation for it is correct — and what
+session 8 records, that a diagnosis which sounds convincing is not one that has
+been tested.
+
+### What is proven working
+
+All of the software. Under finger pressure the test screen rendered with legible
+text, so the library choice, the `0x3C` address, the 128x32 resolution, the
+100 kHz bus setting and the drawing code are all correct and need no rework. The
+rover's own wiring is proven too — SDA on 21, SCL on 22, power and ground. The
+fault is internal to the display module.
+
+### Why there is no home repair
+
+Rebonding means aligning dozens of contacts at roughly 0.05 mm pitch while
+applying controlled heat and pressure at the same time. A soldering iron is the
+wrong tool by an order of magnitude: it would melt the plastic film and bridge
+neighbouring contacts before reaching them. A mechanical clamp — tape or similar,
+holding the ribbon down — does restore the connection and would work on a
+stationary bench.
+
+### Decisions & rationale
+
+- **A replacement module rather than a clamp.** The clamp was considered and
+  rejected. A 4WD rover vibrates continuously, and the pressure holding those
+  contacts would work loose. The failure would then arrive in phase 7, with every
+  subsystem running together, where a screen dropping out is far harder to
+  attribute than it is now.
+- **The display code stays in the firmware.** It is verified and correct, so
+  removing it would throw away proven work and leave nothing to plug the new
+  module into.
+- **The OLED does not block anything.** Phase 3 is the chassis and motors and
+  phase 4 is Wi-Fi control; neither depends on the display. Work continues on
+  those while the replacement is in transit.
+- **The scanner was worth building as its own environment.** It did more than
+  report an address. It became the control measurement — a known-good exchange
+  with the same part over the same wires — and the contrast between it and the
+  failing display is what eventually located the fault.
+
+### Open
+
+It is not known whether the ribbon was already lifted when the module came out of
+its packaging or whether it lifted during handling and soldering. Recorded as
+unknown rather than guessed at.
+
+### Photos
+
+| File | What it shows |
+|---|---|
+| `phase2-oled-under-finger-pressure.jpg` | A finger pressing the far end of the module, at the glass rather than the header. Parts of the test screen light up under that pressure |
+| `phase2-oled-ribbon-lifted.jpg` | The same module with no pressure applied and the screen dark. The flexible ribbon at the far end is visible with its gold contacts exposed and the adhesive around them crumpled — the fault itself |
+| `phase2-oled-debug-bench.jpg` | The bench during the session: the breadboard with all of phase 2 wired, the multimeter with its probes out, and the board still connected |
+
+### Next up
+Phase 3 — chassis assembly, motor wiring and the first driving test. The display
+returns when the replacement module arrives.
