@@ -3,9 +3,12 @@
 A small autonomous rover that demonstrates two active automotive safety systems —
 **Autonomous Emergency Braking (AEB)** and **Lane Keeping Assist (LKA)** — on an ESP32.
 
-> 🚧 **Status:** In active development. Phases 0 and 1 are complete — the board runs a
-> non-blocking loop driving a PWM brake light, a status LED and a debounced mode button.
-> Phase 2 is in progress: both line sensors are wired, calibrated and reading.
+> 🚧 **Status:** In active development. **The rover drives** — the chassis is assembled
+> and all four motors run under PWM control in the right direction, on a split supply.
+> Both line sensors and the ultrasonic sensor are calibrated and reading, inside one
+> non-blocking loop alongside the brake light, status LED and mode button. The OLED is
+> the one part still outstanding: its wiring and address were proven with a bus scanner,
+> but the module itself has a failed ribbon bond and a replacement is on order.
 > See the [roadmap](#roadmap).
 
 SafeRover runs two independent closed control loops (sense → decide → act) on top of a
@@ -70,8 +73,12 @@ turn. This is expected, and it will make tuning `Kp` in the LKA phase slower.
 bank; the two supplies share a common ground. Separating them prevents brownout resets
 when the motors spike current. The chassis's own 4×AA holder is not used.
 
-**Open on the display.** A 0.91" panel is usually 128×32 rather than 128×64. Both the
-resolution and the controller chip will be confirmed in phase 2.
+**The display.** Confirmed in phase 2: a 128×32 SSD1306 answering at `0x3C`, found with
+the bus scanner in [`tools/i2c_scanner/`](tools/i2c_scanner/) rather than assumed from a
+datasheet. The panel renders correctly, but only while the module is squeezed by hand —
+the ribbon bonding its driver to the glass has come loose, which is a factory heat-press
+joint and not something that can be resoldered. A replacement is on order; the firmware
+needs no change.
 
 <details>
 <summary><b>Planned pin map (wiring contract)</b></summary>
@@ -152,7 +159,16 @@ pio run -t upload     # flash to the board
 pio device monitor    # serial monitor @ 115200 baud
 ```
 
-The platform and board are pinned in [`platformio.ini`](platformio.ini).
+The platform, board and library versions are pinned in
+[`platformio.ini`](platformio.ini).
+
+There is a second environment holding a one-shot I²C bus scanner, used to prove the
+display's wiring and address before any display library is loaded. It is kept out of
+`src/` so it never ends up compiled into the rover, and it is built explicitly:
+
+```bash
+pio run -e i2c-scanner -t upload
+```
 
 ---
 
@@ -163,7 +179,7 @@ The platform and board are pinned in [`platformio.ini`](platformio.ini).
 | 0 | Environment — toolchain + Blink compiles | ✅ |
 | 1 | GPIO basics — Serial, button, LED, PWM | ✅ |
 | 2 | Sensors on the bench — OLED, ultrasonic, line sensors | 🔄 |
-| 3 | Vehicle moves — chassis, power, straight-line trim | ⬜ |
+| 3 | Vehicle moves — chassis, power, straight-line trim | ✅ |
 | 4 | Phone control — Wi-Fi dashboard + watchdog stop | ⬜ |
 | 5 | AEB — 3-stage braking + hysteresis | ⬜ |
 | 6 | LKA — track + P-controller tuning | ⬜ |
@@ -173,10 +189,11 @@ The platform and board are pinned in [`platformio.ini`](platformio.ini).
 
 ### Progress photos
 
-[`photos/`](photos/) holds a shot of the breadboard at each stage, plus the serial output
-captured while the line sensors were being calibrated.
+[`photos/`](photos/) holds a shot of the build at each stage — the breadboard as it grew,
+the serial output captured while the line sensors were being calibrated, and the chassis
+coming together.
 
-![Both TCRT5000 line sensors on the breadboard, alongside the brake light, status LED and mode button](photos/phase2-line-sensors-closeup.jpg)
+![The assembled rover: four motors on the lower deck, the L298N and battery pack mounted, control wires running to the ESP32](photos/phase3-wired-for-direction-test.jpg)
 
 A build log with the measurements and the faults hit along the way is in
 [`docs/journal.md`](docs/journal.md).
