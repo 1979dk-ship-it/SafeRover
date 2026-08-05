@@ -947,3 +947,168 @@ once a message has been seen enough times to stop registering.
 ### Next up
 Phase 3 — chassis assembly, motor wiring and the first driving test. The display
 returns when the replacement module arrives.
+
+---
+
+## Session 11 — 2026-08-05 — Chassis assembly, motor wiring and first drive
+
+### Goal
+Assemble the chassis, wire the four motors through the L298N, and get all of them
+turning under PWM control in the direction the code believes they turn.
+
+This is the first session that is mostly mechanical rather than electronic, and
+the constraints that shaped it are physical ones: clearance, hole positions and
+where a part will physically fit.
+
+### What was done
+
+**Layout, and how the plan changed.** The original plan put the battery pack on
+the lower deck, for a low centre of gravity. Dry-fitting it there showed it fouls
+the motor area in both orientations.
+
+Moving it to the upper deck was considered, on the reasoning that a *centred and
+balanced* mass matters more than a *low* one. Height affects rollover in a sharp
+turn, and a rover that drives slowly is at little risk of that; an unbalanced
+rover, on the other hand, drifts on a straight line, and that drift lands directly
+in the `Kp` tuning in phase 6 where it is very hard to separate from a control
+error.
+
+That decision was reversed by a simple observation: the motors hang *below* the
+lower plate, so the top face of that plate is completely clear. The pack ended up
+on the lower deck, set back and centred — which gives a low centre of gravity and
+a balanced one at the same time, and leaves the upper deck free.
+
+**Rejected: mounting the pack under the lower plate.** Ground clearance there is
+about 30 mm with the 65 mm wheels, and the pack is about 20 mm thick. It would sit
+roughly a centimetre off the ground, and it would occupy the only place where the
+line sensors can be held at their working height.
+
+**Line sensors.** Mounted at the front, under the plate, bolted through the
+mounting holes in the sensor boards. Measured height came out at 3.5 cm from the
+ground — exactly the calibration height recorded in session 7 — with no spacer
+needed.
+
+The theoretical figure had been wrong, and it is worth recording why: the plate
+sits at 4 cm, but the TCRT5000 lenses protrude below the body of the sensor board.
+The distance that matters is measured from the lens, not from the face of the
+plate.
+
+**Mounting the L298N.** None of its four mounting holes line up with any hole in
+the chassis, and zip ties do not fit the rectangular slots. Its back is not flat
+either: the cut ends of the soldered pins stand proud, so taping it down with thin
+tape would leave the board resting on those points and push against the solder
+joints.
+
+The chosen fix is double-sided tape thick enough to lift the board clear of those
+protrusions, which also damps vibration. Fitting it is deferred until the wiring
+is finished, because the exact position may still shift depending on how the
+cables end up running.
+
+**The wiring.**
+
+*Power.* The 6xAA pack goes to the L298N's +12V and GND inputs. The +5V pin is
+left unconnected — it is an output from the board's internal regulator, not an
+input. The ESP32 is powered over USB.
+
+*Motors.* The two motors on each side are wired in parallel into the same output
+pair: left on OUT1/OUT2, right on OUT3/OUT4. Differential steering means both
+wheels on a side always do the same thing, so they never need separate channels,
+and the L298N only has two. 4WD changes the wiring and not the code —
+`drive(left, right)` is unchanged.
+
+*Control.* ENA on 32, IN1 on 33, IN2 on 25, IN3 on 26, IN4 on 27, ENB on 14, plus
+a wire tying the expansion board's GND to the same screw terminal that carries the
+black lead from the battery pack.
+
+**That last wire is not optional.** There are two separate supplies here —
+batteries for the motors, USB for the ESP32. Voltage is only ever a difference
+measured against a reference point, so without a shared reference the logic levels
+leaving the ESP32 arrive at the L298N as meaningless numbers. The two boards would
+each be describing their signals against a different zero.
+
+### Problems & challenges
+
+**Fault 1 — two exposed pins at ENA and ENB**
+
+- **Symptom:** with the jumper caps pulled off ENA and ENB, each position left two
+  bare pins, and it was not obvious which one takes the PWM signal.
+- **Explanation:** the jumper cap shorts the chip's enable pin to the board's 5V
+  rail. Remove it and one pin leads to enable, the other to 5V. The board carries
+  no marking to say which is which.
+- **Solution:** settled by measurement rather than by guessing. With everything
+  powered down, resistance was checked between each pin and the +5V screw
+  terminal. A reading near zero identifies the 5V pin; `OL` identifies the enable
+  pin, which is the one the signal goes to.
+
+**Fault 2 — the ESP32 was not seated properly on the expansion board**
+
+- **Symptom:** the motors did not respond to any command.
+- **Diagnosis:** the board was not lined up correctly on the expansion board's
+  headers, so some of the signals never made it across.
+- **Solution:** re-seated it and checked that every pin row was engaged.
+- **Method note:** this is the same root cause already recorded twice in this
+  journal — a gap between what the code assumes and what physically exists. The
+  board looked connected and was not. In session 4 the source was a pin map
+  written from the chip rather than from the board; in session 10 a wire on a pin
+  other than the one the code drives.
+
+**Fault 3 — the right side turned the wrong way**
+
+- **Symptom:** running the direction sequence, the right motors turned opposite to
+  the left ones.
+- **Explanation:** the motors on the two sides are mounted as mirror images of one
+  another, so identical electrical polarity produces opposite rotation in space.
+- **Solution:** swapped both pairs of wires between OUT3 and OUT4. Both motors on
+  that side were swapped together — swapping only one would have set the two
+  motors of the same side fighting each other, drawing high current and heating
+  up.
+- **Why it was fixed in the wiring and not in the code:** so the hardware stays
+  consistent with what the documentation describes, instead of leaving a special
+  case that has to be remembered every time the code is read.
+
+### A finding — the two sides do not run at the same speed
+
+With the direction corrected, the right motors were seen to turn slightly slower
+than the left. That observation is visual, not measured.
+
+A deliberate experiment followed: the right side's duty was raised by 15%. It
+overcorrected visibly, and the code was returned to equal values for both sides.
+
+**The experiment was still worth running, because it produced a bound.** The real
+difference is smaller than 15%. That is quantitative information, and it is worth
+more than the qualitative impression that preceded it.
+
+**Decision: no correction factor yet.** Two reasons. First, the cause has not been
+isolated — it is not known whether the difference comes from mechanical friction
+or from a difference between the motors themselves, and that distinction matters,
+because a factor that papers over mechanical friction hides a symptom that will
+get worse with time. Second, a factor chosen before phase 6 gets tangled up in the
+`Kp` tuning, and separating the two variables afterwards is much harder than
+keeping them apart now.
+
+The plan is to measure it in phase 6 — drive a straight line over a known distance
+and measure the deviation — and only then set a figure that comes from a
+measurement.
+
+### Result
+
+All four motors turn in the correct direction under PWM control. The split supply
+behaves as designed: no brownout on the ESP32 when the motors start, no unusual
+heating from the L298N, and its power LED comes on as expected.
+
+### Open at the end of phase 3
+
+Mounting the L298N. Wiring the line sensors, the HC-SR04, the button, the LEDs and
+the buzzer onto the chassis. Quantifying the speed difference between the sides.
+
+### Photos
+
+| File | What it shows |
+|---|---|
+| `phase3-chassis-motors-mounted.jpg` | The bare chassis with all four motors bolted to the lower plate and the wheels on. Nothing wired yet — the motor leads are still loose |
+| `phase3-layout-dry-fit.jpg` | The dry fit that settled the layout: the L298N, the battery pack, the ultrasonic sensor and the two line sensor boards placed but not fixed, with the upper deck still off |
+| `phase3-wired-for-direction-test.jpg` | Fully wired and powered, with the control wires running to the ESP32 and its power LED lit. This is the state the direction sequence was run in |
+
+### Next up
+Move the bench wiring onto the chassis, then phase 4 — Wi-Fi control from the
+phone, with a watchdog stop.
