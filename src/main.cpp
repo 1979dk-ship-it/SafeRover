@@ -23,6 +23,30 @@ constexpr uint8_t PIN_BRAKE_LIGHT = 19;
 constexpr uint8_t PIN_STATUS_LED = 13;
 constexpr uint8_t PIN_MODE_BUTTON = 23;
 
+// --- L298N motor driver ---
+// Four motors on two channels: the two on each side are wired in parallel into
+// one output pair, so the driver — and the code — only ever sees two sides.
+// ENA and ENB carry the PWM that sets speed. IN1/IN2 and IN3/IN4 are plain
+// digital pins whose pattern sets the direction of their side.
+constexpr uint8_t PIN_MOTOR_ENA = 32; // left side speed
+constexpr uint8_t PIN_MOTOR_IN1 = 33; // left side direction
+constexpr uint8_t PIN_MOTOR_IN2 = 25;
+constexpr uint8_t PIN_MOTOR_IN3 = 26; // right side direction
+constexpr uint8_t PIN_MOTOR_IN4 = 27;
+constexpr uint8_t PIN_MOTOR_ENB = 14; // right side speed
+
+// Observed on the bench: given the same duty on both sides, the right side runs
+// slightly weaker than the left. Two nominally identical motors never are —
+// gearbox friction, brush wear and winding tolerance all differ — so a trim
+// belongs here eventually, applied inside drive() so that no caller can forget
+// it.
+//
+// Nothing is applied yet, on purpose. A 15% boost on the right was tried and
+// overshot visibly, which puts the real figure somewhere below that but does not
+// say where. Guessing again would just trade one wrong number for another. The
+// value gets measured on a straight run over a marked distance, once the rover
+// drives on the floor rather than on a stand.
+
 // Both line sensors sit on ADC1. ADC2 cannot be used while Wi-Fi is running
 // because it shares hardware with the radio, so every analog sensor in this
 // project stays on GPIO 32-39. Only the modules' analog outputs are wired: the
@@ -146,8 +170,8 @@ constexpr uint8_t LINE_SENSOR_SAMPLES = 16;
 // Declared before the L298N is wired so the allocation cannot be taken by
 // accident later.
 constexpr uint8_t PWM_CHANNEL_BRAKE = 0;                        // timer 0
-[[maybe_unused]] constexpr uint8_t PWM_CHANNEL_MOTOR_LEFT = 2;  // timer 1, ENA
-[[maybe_unused]] constexpr uint8_t PWM_CHANNEL_MOTOR_RIGHT = 4; // timer 2, ENB
+constexpr uint8_t PWM_CHANNEL_MOTOR_LEFT = 2;  // timer 1, ENA
+constexpr uint8_t PWM_CHANNEL_MOTOR_RIGHT = 4; // timer 2, ENB
 // 5 kHz is far above the rate the eye can follow, so the light looks steady
 // rather than flickering. 8 bits gives 256 steps, which is finer than anything
 // needed to control motor speed.
@@ -161,6 +185,35 @@ constexpr uint32_t PWM_MAX_DUTY =
 constexpr unsigned long BRAKE_STEP_INTERVAL_MS = 1000;
 constexpr unsigned long LINE_PRINT_INTERVAL_MS = 200;
 constexpr unsigned long DISTANCE_READ_INTERVAL_MS = 100;
+
+// --- Motor direction check (TEMPORARY) ---
+// A bench sequence for reading which way each side actually turns, to be removed
+// once the directions are confirmed and real driving replaces it.
+//
+// Half speed: fast enough that the direction is unmistakable, slow enough that
+// the rover does not run off the table while it is being watched.
+constexpr uint8_t MOTOR_TEST_PERCENT = 50;
+constexpr int16_t MOTOR_TEST_DUTY =
+    static_cast<int16_t>((MOTOR_TEST_PERCENT * PWM_MAX_DUTY) / 100);
+constexpr unsigned long MOTOR_TEST_STEP_MS = 2000;
+
+// One side at a time first: driving both together would hide a side that turns
+// the wrong way, because the rover would still move, just not as expected.
+struct MotorTestStep {
+  int16_t left;
+  int16_t right;
+  const char *label;
+};
+
+constexpr MotorTestStep MOTOR_TEST_STEPS[] = {
+    {MOTOR_TEST_DUTY, 0, "LEFT side forward"},
+    {0, MOTOR_TEST_DUTY, "RIGHT side forward"},
+    {MOTOR_TEST_DUTY, MOTOR_TEST_DUTY, "BOTH sides forward"},
+    {0, 0, "STOP"},
+};
+
+constexpr size_t MOTOR_TEST_STEP_COUNT =
+    sizeof(MOTOR_TEST_STEPS) / sizeof(MOTOR_TEST_STEPS[0]);
 
 // Chosen to sit above the 1-20 ms a tactile switch typically bounces for, and
 // below the 100-150 ms gap between even fast human presses, so genuine presses
@@ -188,6 +241,11 @@ unsigned long lastButtonChange = 0;
 unsigned long lastLinePrint = 0;
 unsigned long lastDistanceRead = 0;
 
+// Starts on the last step, which is the stop, so the wheels are still at
+// power-up and the sequence only begins after the first interval has passed.
+unsigned long lastMotorTestStep = 0;
+size_t motorTestIndex = MOTOR_TEST_STEP_COUNT - 1;
+
 // Percentages are the readable unit; the hardware wants raw counts.
 static uint32_t dutyFromPercent(uint8_t percent) {
   return (static_cast<uint32_t>(percent) * PWM_MAX_DUTY) / 100;
@@ -200,6 +258,43 @@ static void applyBrakeDuty(size_t index) {
   Serial.print("BRAKE LIGHT DUTY ");
   Serial.print(percent);
   Serial.println("%");
+}
+
+// Sets both sides at once. Each argument carries speed in its magnitude and
+// direction in its sign, so one number per side says everything about that side.
+//
+// The two direction pins of a side are driven to opposite levels; which pattern
+// means forward depends on which way round the motor leads were connected, and
+// that is exactly what the bench sequence below is for. Setting both pins to the
+// same level would brake the side rather than turn it, which is why they are
+// always written as a pair.
+static void drive(int16_t left, int16_t right) {
+  const bool leftForward = (left >= 0);
+  digitalWrite(PIN_MOTOR_IN1, leftForward ? HIGH : LOW);
+  digitalWrite(PIN_MOTOR_IN2, leftForward ? LOW : HIGH);
+
+  const bool rightForward = (right >= 0);
+  digitalWrite(PIN_MOTOR_IN3, rightForward ? HIGH : LOW);
+  digitalWrite(PIN_MOTOR_IN4, rightForward ? LOW : HIGH);
+
+  // The sign has been consumed by the direction pins, so only the magnitude is
+  // left for the speed. abs() on the full negative range of int16_t would
+  // overflow, but these values are bounded by PWM_MAX_DUTY long before that.
+  const uint32_t leftDuty = static_cast<uint32_t>(leftForward ? left : -left);
+  const uint32_t rightDuty = static_cast<uint32_t>(rightForward ? right : -right);
+
+  ledcWrite(PIN_MOTOR_ENA, min(leftDuty, PWM_MAX_DUTY));
+  ledcWrite(PIN_MOTOR_ENB, min(rightDuty, PWM_MAX_DUTY));
+}
+
+// TEMPORARY — remove with the rest of the direction check.
+static void applyMotorTestStep(size_t index) {
+  const MotorTestStep &step = MOTOR_TEST_STEPS[index];
+  drive(step.left, step.right);
+
+  // Printed so what is seen on the bench can be matched to what was asked for.
+  Serial.print("MOTOR TEST  ");
+  Serial.println(step.label);
 }
 
 // One reader for both sensors — they are the same part on the same ADC, so the
@@ -352,6 +447,24 @@ void setup() {
   // is why no external one is wired.
   pinMode(PIN_MODE_BUTTON, INPUT_PULLUP);
 
+  // The two enable pins get the same frequency and resolution as the brake
+  // light for now, but they sit on their own timers, so a motor frequency can
+  // be changed later without dragging the brake light along with it.
+  ledcAttachChannel(PIN_MOTOR_ENA, PWM_FREQUENCY_HZ, PWM_RESOLUTION_BITS,
+                    PWM_CHANNEL_MOTOR_LEFT);
+  ledcAttachChannel(PIN_MOTOR_ENB, PWM_FREQUENCY_HZ, PWM_RESOLUTION_BITS,
+                    PWM_CHANNEL_MOTOR_RIGHT);
+
+  pinMode(PIN_MOTOR_IN1, OUTPUT);
+  pinMode(PIN_MOTOR_IN2, OUTPUT);
+  pinMode(PIN_MOTOR_IN3, OUTPUT);
+  pinMode(PIN_MOTOR_IN4, OUTPUT);
+
+  // Stopped before anything else runs. The direction pins power up in an
+  // undefined state, and four motors on a chassis with no caster will happily
+  // drive off a bench while the rest of setup() is still going.
+  drive(0, 0);
+
   // TRIG is driven by us, ECHO is read. Parking TRIG LOW here means the module
   // is not looking at a half-raised line before the first measurement runs.
   pinMode(PIN_ULTRASONIC_TRIG, OUTPUT);
@@ -430,6 +543,15 @@ void loop() {
     Serial.print(right);
     Serial.print("  delta=");
     Serial.println(delta);
+  }
+
+  // TEMPORARY — the motor direction check. Remove once each side is confirmed
+  // to turn the way the code believes it does.
+  if (now - lastMotorTestStep >= MOTOR_TEST_STEP_MS) {
+    lastMotorTestStep = now;
+
+    motorTestIndex = (motorTestIndex + 1) % MOTOR_TEST_STEP_COUNT;
+    applyMotorTestStep(motorTestIndex);
   }
 
   // Median-filtered now that the raw noise has been characterised on the bench:
