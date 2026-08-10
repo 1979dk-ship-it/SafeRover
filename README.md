@@ -37,8 +37,10 @@ stages, like a real car:
 the rover into a wall.
 
 ### 🛣️ LKA — Lane Keeping Assist
-Two infrared sensors detect the lane edges. A **proportional (P) controller** gradually
-corrects the steering and slows the rover down in curves.
+The rover runs inside a white lane marked by two black stripes, with one infrared sensor
+on each side. While it stays in the lane both sensors see white and nothing is corrected.
+A sensor reads dark only once the rover has drifted far enough to reach a stripe, and that
+is what a **proportional (P) controller** acts on to steer it back and to slow it in curves.
 
 Around the two safety systems: an on-board **OLED** status display, a **phone dashboard**
 with live telemetry and a brake-event log, a physical **mode button**, and every braking

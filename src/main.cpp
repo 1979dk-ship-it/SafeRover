@@ -50,20 +50,46 @@ constexpr uint8_t PIN_MOTOR_ENB = 14; // right side speed
 // Both line sensors sit on ADC1. ADC2 cannot be used while Wi-Fi is running
 // because it shares hardware with the radio, so every analog sensor in this
 // project stays on GPIO 32-39. Only the modules' analog outputs are wired: the
-// LKA needs a continuous value for its proportional controller, not a binary DO
-// answer.
+// LKA has to know how far a sensor has gone into a stripe, not merely that it
+// has, and the digital output cannot say that.
 //
-// Measured on the bench at the working height of 3.5 cm, averaged over 16
-// samples. The direction is the opposite of the intuitive one — a HIGH value
-// means a DARK surface, so a high reading is the sensor sitting over the line.
+// These are replacement modules. The pair calibrated in phase 2 was swapped for
+// different units of the same model, so none of those figures carry over. What
+// follows was measured on the assembled vehicle, at the mounted height of
+// 3.75 cm, over the materials the track is made of: white bristol board and
+// black tape. Optical return depends on the material and on the geometry, so a
+// bench measurement over generic paper does not describe this setup.
 //
-//   both over white    L ~60     R ~70     delta ~-10
-//   both over black    L ~4028   R ~4006   delta ~+20
-//   one over each                          delta ~4030
+// The direction is the opposite of the intuitive one — a HIGH value means a DARK
+// surface. The rover runs inside a white lane marked by two black stripes, one
+// sensor to a side, so while it stays in the lane both sensors read low. A high
+// reading means that sensor has reached a stripe, which is what a deviation
+// looks like. The last two rows below are those deviation cases; neither of them
+// is a centred reference.
 //
-// Noise on a steady reading is about +/-7. The two sensors track each other to
-// within 20 counts over the same surface — under 1% of range — so neither needs
-// its own correction factor.
+//   both over white    L ~1417   R ~1691
+//   left over black    L ~3250   R ~1677
+//   right over black   L ~1354   R ~3436
+//
+//   span white->black  L 1833    R 1745
+//
+// Two separate uncertainties, and the larger is the one to design against. Each
+// printed reading is already an average of 16 samples; successive readings, 200
+// ms apart with nothing touched, repeat to about +/-5 counts. Between separate
+// measurements the value drifts by up to 65.
+//
+// White and black stay well apart under that drift. A threshold shared by both
+// sensors works — anything from 1691 to 3250 classifies every reading correctly,
+// with about 780 counts of margin in the worst case. What survives the drift is
+// that separation, not the absolute values.
+//
+// What the code must not assume is that the two are interchangeable. They read
+// 274 counts apart over the same white, so the raw difference L - R rests at
+// -274 rather than at zero, and the offset moves between builds — it was 330 on
+// the previous pair. Nothing corrects for it yet and its cause is not isolated.
+//
+// The measurements and the reasoning behind them are in docs/journal.md,
+// session 12.
 constexpr uint8_t PIN_LINE_SENSOR_LEFT = 34;
 constexpr uint8_t PIN_LINE_SENSOR_RIGHT = 35;
 
@@ -223,6 +249,15 @@ constexpr unsigned long BUTTON_DEBOUNCE_MS = 50;
 // --- Serial ---
 constexpr unsigned long SERIAL_BAUD = 115200;
 
+// TEMPORARY — set back to true when the line sensors have been read.
+// Silences every repeating line except the line sensors, so their readings can
+// be watched without four other tasks scrolling them off the screen. Only the
+// printing is suppressed: the brake light, the button, the motor sequence and
+// the distance measurement all still run exactly as before, so the loop timing
+// stays representative. One-off messages at boot are left alone — they fire once
+// and they are how you know the board actually restarted.
+constexpr bool SERIAL_VERBOSE = false;
+
 // Brightness steps the brake light cycles through, as percentages.
 constexpr uint8_t BRAKE_DUTY_PERCENTS[] = {25, 50, 75, 100};
 constexpr size_t BRAKE_DUTY_STEPS =
@@ -255,9 +290,11 @@ static void applyBrakeDuty(size_t index) {
   const uint8_t percent = BRAKE_DUTY_PERCENTS[index];
   ledcWrite(PIN_BRAKE_LIGHT, dutyFromPercent(percent));
 
-  Serial.print("BRAKE LIGHT DUTY ");
-  Serial.print(percent);
-  Serial.println("%");
+  if (SERIAL_VERBOSE) {
+    Serial.print("BRAKE LIGHT DUTY ");
+    Serial.print(percent);
+    Serial.println("%");
+  }
 }
 
 // Sets both sides at once. Each argument carries speed in its magnitude and
@@ -293,8 +330,10 @@ static void applyMotorTestStep(size_t index) {
   drive(step.left, step.right);
 
   // Printed so what is seen on the bench can be matched to what was asked for.
-  Serial.print("MOTOR TEST  ");
-  Serial.println(step.label);
+  if (SERIAL_VERBOSE) {
+    Serial.print("MOTOR TEST  ");
+    Serial.println(step.label);
+  }
 }
 
 // One reader for both sensors — they are the same part on the same ADC, so the
@@ -522,7 +561,10 @@ void loop() {
     lastButtonChange = now;
     lastButtonPressed = buttonPressed;
 
-    Serial.println(buttonPressed ? "BUTTON PRESSED" : "BUTTON RELEASED");
+    if (SERIAL_VERBOSE) {
+      Serial.println(buttonPressed ? "BUTTON PRESSED" : "BUTTON RELEASED");
+    }
+    
   }
 
   // Data collection only: read and report. No thresholds, no decisions.
@@ -532,8 +574,10 @@ void loop() {
     const uint16_t left = readLineAveraged(PIN_LINE_SENSOR_LEFT);
     const uint16_t right = readLineAveraged(PIN_LINE_SENSOR_RIGHT);
 
-    // Left minus right is the error signal the LKA's P controller will act on:
-    // zero means the rover is centred, and the sign says which way it drifted.
+    // A bench aid, not a control input. Both sensors read white while the rover
+    // is inside the lane, so this difference rests at a non-zero constant there
+    // and only moves once one of them reaches a stripe. How the LKA turns the
+    // two readings into an error signal is still open.
     const int16_t delta =
         static_cast<int16_t>(left) - static_cast<int16_t>(right);
 
@@ -566,19 +610,21 @@ void loop() {
     // sensor or from the conversion below it.
     const unsigned long echoDuration = readEchoMedian();
 
-    Serial.print("DIST  echo=");
-    Serial.print(echoDuration);
-    Serial.print("us  ");
+    if (SERIAL_VERBOSE) {
+      Serial.print("DIST  echo=");
+      Serial.print(echoDuration);
+      Serial.print("us  ");
 
-    // A timeout is not a distance. Converting the 0 would print 0.0 cm, which
-    // reads exactly like an obstacle pressed against the sensor — the most
-    // dangerous possible misreading once this drives the brakes.
-    if (echoDuration == 0) {
-      Serial.println("d=--  no echo");
-    } else {
-      Serial.print("d=");
-      Serial.print(distanceFromDuration(echoDuration), 1);
-      Serial.println("cm");
+      // A timeout is not a distance. Converting the 0 would print 0.0 cm, which
+      // reads exactly like an obstacle pressed against the sensor — the most
+      // dangerous possible misreading once this drives the brakes.
+      if (echoDuration == 0) {
+        Serial.println("d=--  no echo");
+      } else {
+        Serial.print("d=");
+        Serial.print(distanceFromDuration(echoDuration), 1);
+        Serial.println("cm");
+      }
     }
   }
 }

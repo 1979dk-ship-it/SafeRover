@@ -404,6 +404,10 @@ Measurements, taken at a working height of 3.5 cm and averaged over 16 samples:
 Noise on a steady reading is about ±7. Note the direction: **a high value means a
 dark surface**, which is the opposite of the intuitive reading.
 
+**These figures no longer describe the hardware.** Both modules were replaced
+with different units of the same model, and the calibration in force is the one
+in session 12.
+
 ### Problems & challenges
 
 **Fault 1 — the wrong working height hid the signal**
@@ -447,6 +451,10 @@ dark surface**, which is the opposite of the intuitive reading.
   a proportional controller that corrects in proportion to how far off the line the
   rover is. DO returns a binary answer after comparing against a threshold, which
   does not carry that magnitude.
+  **The geometry behind that sentence was settled later** — the rover runs inside
+  a white lane between two black stripes rather than following a line, so what the
+  analog value carries is how far a sensor has gone into a stripe. The choice of
+  AO over DO is unchanged by it. See session 12.
 - **Modules powered from 3.3 V rather than 5 V.** The AO output cannot exceed its
   own supply voltage, so running the modules at 3.3 V means the output can never
   exceed what an ESP32 pin tolerates. That removes the need for a voltage divider.
@@ -457,6 +465,8 @@ dark surface**, which is the opposite of the intuitive reading.
 - **No per-sensor correction factor.** The two sensors read within 10 to 20 counts
   of each other over the same surface, which is under half a percent of the working
   range. Calibrating them individually would add complexity for no measurable gain.
+  **Reversed in session 12** — the replacement modules read 274 counts apart over
+  the same white surface, and their working ranges differ as well.
 - **The OLED was deferred.** Its pin header arrived unsoldered, and an unsoldered
   connection would have introduced intermittent contact faults. The part was put off
   until it can be soldered rather than risking that.
@@ -1112,3 +1122,109 @@ the buzzer onto the chassis. Quantifying the speed difference between the sides.
 ### Next up
 Move the bench wiring onto the chassis, then phase 4 — Wi-Fi control from the
 phone, with a watchdog stop.
+
+---
+
+## Session 12 — 2026-08-08 — Line sensors replaced and recalibrated on the vehicle
+
+### Goal
+Recalibrate the line sensors after both modules were replaced — this time on the
+assembled vehicle, at the height the sensors actually sit at, and over the
+materials the track will be built from, rather than on the bench.
+
+### What was done
+Both TCRT5000 (HW-870) modules were swapped for different units of the same
+model, so the phase 2 calibration no longer described the hardware. The
+measurement was repeated in three positions over white bristol board and black
+tape, with the sensors mounted on the vehicle. Every figure is an average of 16
+samples.
+
+The sensors sit 3.75 cm above the surface. Around 3.10 cm was found to give the
+strongest return from this part, but the mounting on the chassis does not go
+lower, and the figures below show 3.75 cm is close enough — white and black stay
+about 1800 counts apart either way. Sessions 7 and 11 record 3.5 cm; those were
+rougher measurements, and 3.75 cm is the figure taken with care.
+
+| Condition | Left | Right |
+|---|---|---|
+| Both over white | ~1417 | ~1691 |
+| Left over black | ~3250 | ~1677 |
+| Right over black | ~1354 | ~3436 |
+
+The rover runs inside a white lane marked by two black stripes, one sensor to a
+side, with the lane wider than the gap between the sensors. Inside the lane both
+sensors are over white, which is the first row. The other two are what a
+deviation looks like: one sensor has reached a stripe while the other is still
+over white. Neither of them is a centred reference.
+
+| Working range | Left | Right |
+|---|---|---|
+| Span, white → black | 1833 | 1745 |
+
+Successive readings, taken 200 ms apart with nothing touched, repeat to within
+about ±5 counts. Between separate measurements the value drifts by up to 65.
+
+### Problems & challenges
+
+**Finding 1 — the reading over a fixed white surface drifts**
+
+- **Symptom:** readings over the same white surface moved between runs, and in
+  one run a step appeared partway through the sequence.
+- **Diagnosis:** these are two separate observations, and they do not support the
+  same conclusion. Between runs the left sensor moved 63 counts while the right
+  moved 14 — asymmetric, which argues against a single shared cause and may mean
+  the two modules respond differently to light. That has not been investigated.
+  The step within one run was crossed by both sensors together, and it is only
+  that second observation that points at the measuring environment rather than at
+  a fault in one module. Shadow and changes in room light are the suspected
+  explanation for both, since neither the vehicle nor the surface moved during
+  the run. Neither was isolated by measurement, so neither is stated as fact.
+- **Solution:** none needed. The drift is an order of magnitude smaller than the
+  margin from a threshold to the nearest reading — about 65 counts against about
+  780. Recorded as a known limit, not as an open fault.
+
+### Decisions & rationale
+
+- **Calibrated on the assembled vehicle and over the real track materials, not on
+  the bench.** Optical return depends on both the material and the geometry, so a
+  sheet of paper on a table does not stand in for white bristol board under a
+  mounted sensor. This is the same lesson as the working-height fault in session
+  7, where the quantity actually being measured turned out to be reflected
+  ambient light rather than the module's own signal. A bench measurement
+  describes the bench.
+- **Momentary repeatability and drift recorded separately, with the larger figure
+  used for design.** The ±5 counts describe how much successive readings differ
+  from one another while nothing moves, and each of those readings is already an
+  average of 16 samples. They say nothing about how far the reading walks between
+  runs. Sizing a margin from ±5 would be sizing it from the wrong quantity; 65 is
+  the number a threshold has to survive.
+- **Session 7's "no per-sensor correction factor" is reversed for this pair.** The
+  two sensors read 274 counts apart over the same white, and their spans differ
+  by 88. A shared threshold is still usable — any value between 1691 and 3250
+  classifies every reading correctly — but it falls near 57% of the left sensor's
+  span against 45% of the right's, so the two do not cross the edge of the tape at
+  the same physical position. The offset is also not a property that can be fixed
+  once: it was 330 counts on the previous modules and is 274 on these, so it moves
+  from build to build. Its cause has not been isolated — a local height difference
+  between the two mountings and unit-to-unit spread are both still open.
+- **No normalisation baked into the code at this stage.** Scaling each sensor onto
+  a common range from its measured endpoints would remove the offset and the span
+  difference in one step. The catch is that those endpoints are exactly the
+  light-dependent, geometry-dependent numbers this session measured drifting.
+  Fixing them as constants would shift the whole scale under different lighting,
+  including the room the project is presented in. Recorded as an option, with that
+  caveat attached to it.
+
+### Photos
+
+| File | What it shows |
+|---|---|
+| `phase2-line-sensors-recalibration-setup.jpg` | The recalibration setup: the assembled rover on white bristol board with a strip of black tape laid across it, both line sensors sitting over the tape. These are the materials the track will be built from, which is the point — the earlier calibration was taken on a bench over generic paper |
+
+### Next up
+Deciding the track geometry — the lane width, the stripe width and the spacing
+between the sensors, none of which is fixed yet — and the LKA controller
+architecture along with it. The two do not settle separately: inside the lane
+both sensors read white and there is nothing to correct on, so the first question
+is not how to combine the two readings but at what point correction should start
+at all.
