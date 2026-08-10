@@ -1139,11 +1139,17 @@ measurement was repeated in three positions over white bristol board and black
 tape, with the sensors mounted on the vehicle. Every figure is an average of 16
 samples.
 
-The sensors sit 3.75 cm above the surface. Around 3.10 cm was found to give the
-strongest return from this part, but the mounting on the chassis does not go
-lower, and the figures below show 3.75 cm is close enough — white and black stay
-about 1800 counts apart either way. Sessions 7 and 11 record 3.5 cm; those were
-rougher measurements, and 3.75 cm is the figure taken with care.
+The sensors are fixed 3.75 cm above the surface, which is as low as the chassis
+allows; around 3.10 cm returns more signal. Bringing the surface closer was tried
+directly, with nothing else moved, and both readings move further apart — white
+drops, black rises — so the working range widens. The smaller range recorded here
+is therefore a consequence of the mounting height and not of the replacement
+modules. The black end moving at all is the surprising half of that, and the
+suspected reason is the one already found in session 7, that the phototransistor
+answers any infrared reaching it: a surface held close shades it from the room.
+That was not tested on its own. Note also that the modules and the height changed
+together between the two calibrations, so the tables cannot separate one from the
+other. Sessions 7 and 11 record 3.5 cm, which was never re-verified.
 
 | Condition | Left | Right |
 |---|---|---|
@@ -1206,7 +1212,13 @@ about ±5 counts. Between separate measurements the value drifts by up to 65.
   the same physical position. The offset is also not a property that can be fixed
   once: it was 330 counts on the previous modules and is 274 on these, so it moves
   from build to build. Its cause has not been isolated — a local height difference
-  between the two mountings and unit-to-unit spread are both still open.
+  between the two mountings and unit-to-unit spread are both still open. The two
+  sensors sit at the same height as far as it can be measured, which does not rule
+  the first one out: the readings move by roughly 270 counts per millimetre near
+  this height, so about a millimetre of difference would account for the whole 274,
+  and that is finer than the measurement resolves. Swapping the two modules between
+  their mountings would separate the two candidates, since the offset either
+  follows the module or stays with the position.
 - **No normalisation baked into the code at this stage.** Scaling each sensor onto
   a common range from its measured endpoints would remove the offset and the span
   difference in one step. The catch is that those endpoints are exactly the
