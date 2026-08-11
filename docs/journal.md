@@ -1240,3 +1240,123 @@ architecture along with it. The two do not settle separately: inside the lane
 both sensors read white and there is nothing to correct on, so the first question
 is not how to combine the two readings but at what point correction should start
 at all.
+
+---
+
+## Session 13 — 2026-08-10 — Upper deck, the vehicle wired on itself, and a full-duty motor check
+
+### Goal
+Get the electronics onto the vehicle. Up to this point only the line sensors were
+connected on the chassis — session 12 calibrated them in place with everything
+else disconnected — and the rest still lived on the bench.
+
+### What was done
+- The new upper acrylic plate was screwed down, and the wire runs were routed
+  underneath it.
+- Two mini breadboards were placed on the upper plate, with the expansion board
+  and the ESP32 behind them. That layout leaves room for a battery holder which
+  has been ordered and has not arrived yet.
+- Seventeen wires were run: seven to the L298N, six to the two line sensors, and
+  four to the HC-SR04 through the voltage divider, which sits on the mini
+  breadboard at the front.
+- Every one of the seventeen was checked by eye against the pin map in README.md
+  before any power was applied, and the two divider resistors were measured
+  individually at the same time.
+- The vehicle was then powered up and the motor sequence was run with the wheels
+  off the ground. All four motors turned, both sides reached speed, and nothing
+  behaved unusually. A run of all four together at full duty followed.
+
+### Problems & challenges
+None. Nothing had to be rewired after the check, and the motor runs behaved as
+expected.
+
+### Decisions & rationale
+- **The wiring was verified before power, not after a fault.** All seventeen
+  wires were read against the pin map in README.md, and the two divider resistors
+  were measured individually rather than trusted from their colour bands. Every
+  wiring fault recorded in this journal so far was found the other way round —
+  after something failed to work — and each one cost most of a session to trace
+  back. Checking first costs a few minutes and turns the pin map into something
+  that gets used rather than something that gets written.
+- **The layout was chosen around a part that has not arrived.** The expansion
+  board sits at the back specifically to leave room for the battery holder on
+  order, so the boards will not have to move again once it turns up.
+- **The motor check ran with the wheels off the ground.** What the check is for is
+  watching all four motors turn, and that does not need the vehicle to travel. On
+  the floor at full duty it covers ground fast enough to reach the edge of a desk,
+  or to pull on the USB cable, before there is time to react.
+
+### Photos
+
+| File | What it shows |
+|---|---|
+| `phase3-upper-deck-and-tidied-wiring.jpg` | The vehicle with the new upper plate screwed down and the wire runs routed beneath it, carrying the two mini breadboards and the expansion board. The HC-SR04 is at the front; the battery pack stays on the lower plate |
+
+### Next up
+Connect what sits on the upper deck, starting with the replacement display. The
+mode button, the brake LEDs, the status LED and the buzzer are not part of the
+seventeen wires and have not moved onto the vehicle yet.
+
+---
+
+## Session 14 — 2026-08-11 — The replacement display, and the end of phase 2
+
+### Goal
+Fit the replacement OLED and confirm it works, which is the last item left open
+in phase 2.
+
+### What was done
+- The replacement is the same part as the module that failed, a 0.91" 128x32 I2C
+  panel, from the same seller, ordered this time with the pin header already
+  soldered.
+- It was wired to the same pins as before: SDA on GPIO 21, SCL on GPIO 22, and
+  power from 3V3.
+- It sits on a mini breadboard, which will most likely stay its permanent place.
+- Connecting the USB cable was the whole test. The rover firmware already on the
+  board draws the test screen at boot, so the panel rendered immediately, before
+  anything was uploaded. The border closed on all four sides and the third line
+  read 128x32.
+
+### Problems & challenges
+
+**The display fault from session 10, closed**
+
+- **Symptom, as recorded then:** the panel rendered only while the module was
+  squeezed by hand, and went blank as soon as the pressure came off.
+- **Diagnosis, as recorded then:** the ribbon bonding the driver to the glass had
+  lifted. That entry deliberately left the firmware alone, having already
+  confirmed the panel was a 128x32 SSD1306 answering at 0x3C.
+- **Solution:** replacing the module and changing nothing else was enough. The
+  firmware was not touched, and at no point was the code suspected. Swapping one
+  part while everything around it stays the same is what isolates the cause: the
+  symptom went with the part.
+
+### Decisions & rationale
+- **Ordered with the pin header already soldered.** Session 7 deferred this
+  component because its header arrived unsoldered, and an unsoldered joint would
+  have introduced intermittent contact faults on top of whatever else was being
+  debugged. Asking the seller to solder it removed that step.
+
+  It does not explain why this module works. Nothing here establishes that, and a
+  module that simply left the factory intact would look exactly the same from the
+  outside. What it does is remove a variable rather than answer a question:
+  session 10 could not say whether the ribbon on the failed module was already
+  lifted out of the packaging or lifted while it was being handled and soldered,
+  and this one was never handled that way.
+- **No bus scan was run.** The firmware already addresses the device the scanner
+  found on the previous module, this is the same model, and the screen rendered.
+  There was nothing left for a scan to establish, and flashing the scanner would
+  have replaced working firmware to learn less.
+- **No code change.** The display code written in session 10 was left exactly as
+  it was.
+
+### Photos
+
+| File | What it shows |
+|---|---|
+| `phase2-oled-working-on-vehicle.jpg` | The replacement panel rendering the test screen on the vehicle. The border closes on all four sides, and the third line prints the resolution the firmware assumes |
+
+### Next up
+Phase 2 is finished — the line sensors, the HC-SR04 and the display are all
+working on the vehicle. Phase 4: Wi-Fi control from the phone, with a watchdog
+stop.
