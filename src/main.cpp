@@ -1,7 +1,10 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <Arduino.h>
+#include <WiFi.h>
 #include <Wire.h>
+
+#include "secrets.h"
 
 // Phase 1 — brake light on PWM, status LED and mode button.
 // Phase 2 — two line sensors on GPIO 34 and 35, read and reported together with
@@ -13,6 +16,11 @@
 // follow the wiring contract in README.md. GPIO 16/17 from the original plan
 // are not broken out on this 30-pin board, so the brake light is on 19 and the
 // status LED on 13.
+//
+// Phase 4 — the rover brings up its own Wi-Fi access point. Nothing serves or
+// listens on it yet: no dashboard, no web server, no driving commands. Those
+// come as separate steps, deliberately, because a network and a server brought
+// up together and failing together say nothing about which of the two broke.
 //
 // The PWM here runs on the brake light only because it is already wired and the
 // result is visible. In the finished rover the brake light is on/off, and this
@@ -26,8 +34,8 @@ constexpr uint8_t PIN_MODE_BUTTON = 23;
 // The AEB warning output. This is a three-pin module — GND, I/O, VCC — with a
 // transistor on the board, so the I/O line is a control input and draws very
 // little current from the pin. The buzzer is the active kind, with its own
-// oscillator inside, so holding the pin HIGH is enough to make a sound. It needs
-// neither tone() nor PWM, and driving it with either would only fight the
+// oscillator inside, so holding the pin HIGH is enough to make a sound. It
+// needs neither tone() nor PWM, and driving it with either would only fight the
 // oscillator it already has.
 constexpr uint8_t PIN_BUZZER = 4;
 
@@ -40,7 +48,8 @@ constexpr uint8_t PIN_BUZZER = 4;
 // touched GPIO 4, and it will do the same in the window between a reset and the
 // line below that silences it. For the AEB stage that cuts both ways: a crashed
 // or resetting board announces itself, which is not the worst behaviour for a
-// safety warning, but it also means silence depends on the firmware being alive.
+// safety warning, but it also means silence depends on the firmware being
+// alive.
 constexpr uint8_t BUZZER_SOUND = LOW;
 constexpr uint8_t BUZZER_SILENT = HIGH;
 
@@ -273,6 +282,38 @@ constexpr unsigned long SERIAL_BAUD = 115200;
 // once and they are how you know the board actually restarted.
 constexpr bool SERIAL_VERBOSE = true;
 
+// --- Wi-Fi access point ---
+// The rover creates its own network instead of joining an existing one. A
+// demonstration cannot depend on infrastructure nobody here controls:
+// institutional networks often need a login through a browser, hide their
+// password, or isolate connected devices from one another, and any of those
+// takes the phone control down at the worst possible moment. An access point
+// of its own works in any room, and always answers at the same address.
+//
+// Phase 8 adds Station mode alongside this one, so the cloud reporting has a
+// route to the internet. That is an addition rather than a replacement — the
+// phone keeps talking to the rover directly either way.
+constexpr char WIFI_AP_SSID[] = "Saferover";
+
+// The passphrase is in src/secrets.h, which is not committed: this repository
+// is public. WPA2 refuses anything shorter than eight characters, and the
+// access point then fails to come up rather than falling back to an open
+// network — part of why the result is reported explicitly below.
+
+// One device at a time. Two operators sending driving commands at once is a
+// genuinely unsafe state: one brakes while the other accelerates, and the
+// rover obeys whichever packet landed last. Capping it in the radio means the
+// command code never has to arbitrate between them, because the second phone
+// cannot associate in the first place.
+constexpr uint8_t WIFI_AP_MAX_CLIENTS = 1;
+
+// softAP() takes the channel and the hidden flag positionally ahead of the
+// client limit, so both have to be given in order to reach it. Channel 1 is
+// the default and there is no reason yet to move off it. The SSID stays
+// broadcast: hiding it is not a security measure, only an inconvenience.
+constexpr uint8_t WIFI_AP_CHANNEL = 1;
+constexpr bool WIFI_AP_HIDDEN = false;
+
 // Brightness steps the brake light cycles through, as percentages.
 constexpr uint8_t BRAKE_DUTY_PERCENTS[] = {25, 50, 75, 100};
 constexpr size_t BRAKE_DUTY_STEPS =
@@ -473,10 +514,42 @@ static void showTestScreen() {
   display.display();
 }
 
+// Brings up the access point and reports where to find it. Nothing here waits:
+// softAP() returns with the interface already up and addressed, so there is no
+// delay to justify.
+//
+// From here on the radio is running, which is where the ADC2 restriction noted
+// beside the line sensors stops being theoretical. Both of them are on ADC1,
+// so nothing about them changes.
+static void startAccessPoint() {
+  // AP only. WIFI_AP_STA would also raise the station interface, which has no
+  // network to join yet and would spend its time scanning for one.
+  WiFi.mode(WIFI_AP);
+
+  const bool started =
+      WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASSWORD, WIFI_AP_CHANNEL,
+                  WIFI_AP_HIDDEN, WIFI_AP_MAX_CLIENTS);
+
+  // Deliberately not behind SERIAL_VERBOSE. These print once at boot, and the
+  // address is the only way to know what to point a browser at.
+  if (!started) {
+    // Reported and then let go, the same as the display above: a rover that
+    // stops dead because a radio did not come up is worse than one that still
+    // drives without it.
+    Serial.println("WIFI AP FAILED - rover continues without it");
+    return;
+  }
+
+  Serial.print("WIFI AP up  SSID=");
+  Serial.println(WIFI_AP_SSID);
+  Serial.print("WIFI AP IP  ");
+  Serial.println(WiFi.softAPIP());
+}
+
 void setup() {
-  // First, before anything else: the buzzer sounds while its pin is undriven, so
-  // every instruction that runs before this one is an instruction spent making
-  // noise. Serial.begin() alone is long enough to hear.
+  // First, before anything else: the buzzer sounds while its pin is undriven,
+  // so every instruction that runs before this one is an instruction spent
+  // making noise. Serial.begin() alone is long enough to hear.
   //
   // The output latch is set before the pin becomes an output, so it drives the
   // silent level as it switches rather than passing through the active one.
@@ -549,6 +622,8 @@ void setup() {
                    "chip - try Adafruit_SH110X");
   }
 
+  startAccessPoint();
+
   Serial.print("SafeRover boot OK - brake light PWM on GPIO ");
   Serial.println(PIN_BRAKE_LIGHT);
 
@@ -557,12 +632,12 @@ void setup() {
   // TEMPORARY — one beep, to prove the buzzer works at all. It is the only part
   // in the project that has never been tested, on the bench or on the vehicle,
   // and nothing else in the firmware drives this pin until the AEB stage in
-  // phase 5. Without this it would stay unverified until the moment it is needed
-  // for something real. Remove it when AEB takes the pin over.
+  // phase 5. Without this it would stay unverified until the moment it is
+  // needed for something real. Remove it when AEB takes the pin over.
   //
-  // delay() is allowed here. The rule against it applies to the main loop, where
-  // blocking means the sensors stop being read; setup() runs once before that
-  // loop starts and holds nothing up.
+  // delay() is allowed here. The rule against it applies to the main loop,
+  // where blocking means the sensors stop being read; setup() runs once before
+  // that loop starts and holds nothing up.
   if (SERIAL_VERBOSE) {
     Serial.print("BUZZER TEST  ");
     Serial.print(BUZZER_TEST_MS);
@@ -635,8 +710,8 @@ void loop() {
   }
 
   // TEMPORARY — ends the full-power burst that setup() started. Subtracting the
-  // two millis() values rather than comparing them keeps this correct across the
-  // counter's rollover, the same as every other timer in this loop.
+  // two millis() values rather than comparing them keeps this correct across
+  // the counter's rollover, the same as every other timer in this loop.
   if (motorTestRunning && now - motorTestStart >= MOTOR_TEST_RUN_MS) {
     drive(0, 0);
     motorTestRunning = false;

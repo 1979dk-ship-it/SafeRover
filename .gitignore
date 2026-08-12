@@ -13,6 +13,9 @@
 compile_commands.json
 .cache/
 
+# Wi-Fi credentials — this repository is public
+src/secrets.h
+
 # Claude Code internal context — not part of the project
 CLAUDE.md
 .claude/

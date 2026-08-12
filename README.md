@@ -163,6 +163,19 @@ pio device monitor    # serial monitor @ 115200 baud
 The platform, board and library versions are pinned in
 [`platformio.ini`](platformio.ini).
 
+The rover serves its own Wi-Fi access point, and its passphrase is deliberately not
+in this repository — this repo is public. Create `src/secrets.h` before the first
+build, or the compile fails on a missing include:
+
+```cpp
+#pragma once
+constexpr char WIFI_AP_PASSWORD[] = "your-passphrase";  // WPA2: 8 characters minimum
+```
+
+The network name is `Saferover`, and it is in the source: an SSID is broadcast over
+the air anyway, so hiding it would protect nothing and only make the network harder
+to find.
+
 There is a second environment holding a one-shot I²C bus scanner, used to prove the
 display's wiring and address before any display library is loaded. It is kept out of
 `src/` so it never ends up compiled into the rover, and it is built explicitly:
