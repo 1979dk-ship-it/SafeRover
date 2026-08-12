@@ -1358,5 +1358,11 @@ in phase 2.
 
 ### Next up
 Phase 2 is finished — the line sensors, the HC-SR04 and the display are all
-working on the vehicle. Phase 4: Wi-Fi control from the phone, with a watchdog
-stop.
+working on the vehicle.
+
+Next is the wiring, not the next phase. The four parts still on the bench are the
+mode button, the brake LEDs, the status LED and the buzzer, and connecting them
+fills the pin map. The firmware already drives the first three, so connecting
+them is their test. The buzzer is the exception: there is no `PIN_BUZZER` in the
+firmware at all, so wiring it proves nothing until the AEB stage gives it
+something to do. Phase 4, Wi-Fi control from the phone, comes after that.
