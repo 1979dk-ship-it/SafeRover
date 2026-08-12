@@ -1366,3 +1366,78 @@ fills the pin map. The firmware already drives the first three, so connecting
 them is their test. The buzzer is the exception: there is no `PIN_BUZZER` in the
 firmware at all, so wiring it proves nothing until the AEB stage gives it
 something to do. Phase 4, Wi-Fi control from the phone, comes after that.
+
+---
+
+## Session 15 — 2026-08-12 — The rest of the wiring, and a buzzer that would not stop
+
+### Goal
+Wire the four parts still sitting on the bench — the mode button, the brake LEDs,
+the status LED and the buzzer — and finish the pin map.
+
+### What was done
+- All four were wired onto the vehicle in one go.
+- The button, the brake LEDs and the status LED went on without incident. The
+  firmware already drives all three, so connecting them was the whole test: one
+  power-up showed the status LED lit, the brake lights stepping through their
+  four duty levels, and the button printing on press and release.
+- The buzzer could not be tested that way, because there was no `PIN_BUZZER` in
+  the firmware at all. It belongs to the AEB stage in phase 5, and nothing before
+  it had any reason to touch GPIO 4. Code was written for it during this session
+  purely so the part could be verified.
+- With that, every component in the project is wired on the vehicle and has been
+  seen working there. The pin map is full: sixteen pins in use, and the only
+  three this board still exposes are boot-strapping pins.
+
+### Problems & challenges
+
+**Fault 1 — the buzzer sounded continuously from the moment it had power**
+
+- **Symptom:** connecting the module's VCC made it sound at full volume, and it
+  did not stop. This was before a single line of code had been written for it.
+- **Diagnosis:** the firmware on the board at that point did not touch GPIO 4, so
+  the pin was left undriven, and the obvious reading of that was that it
+  explained the noise on its own — an input with nothing holding it does not sit
+  still, and giving it a defined level ought to settle it. Code was added to
+  drive it low at the start of `setup()`. It made no difference: the module went
+  on sounding. That is what settled the question. This is the active-low kind, so
+  low is the level that makes it sound, and what it needed was a high.
+- **Solution:** the two levels became named constants, `BUZZER_SOUND` and
+  `BUZZER_SILENT`, so the polarity lives in one place rather than spread through
+  the file as bare `HIGH` and `LOW`. The silencing moved to the first line of
+  `setup()`, ahead of `Serial.begin()`, because everything that runs before it
+  runs out loud.
+- **What it comes down to:** with power applied and nothing driving its input,
+  the default state of this module is to make noise. Silence is not its resting
+  state — it is something the firmware has to assert and keep asserting.
+
+### Decisions & rationale
+- **The polarity was established by test, not assumed.** These modules are sold
+  in both polarities and nothing on the board says which one this is. The obvious
+  reading of the symptom turned out to be wrong, and what caught it was driving
+  the pin low and hearing the noise carry on. Writing `HIGH` and `LOW` directly
+  would have buried that assumption in four separate places; two named constants
+  put it in one, where the comment beside them can say it came from a
+  measurement.
+- **Silenced on the first line of `setup()`, before `Serial.begin()`.** Every
+  instruction that runs before the pin is driven is an instruction spent making
+  noise, and `Serial.begin()` on its own is long enough to hear. The output latch
+  is also set before the pin is switched to an output, so it drives the silent
+  level as it changes over instead of passing through the active one on the way.
+- **Carried into phase 5.** Because the resting state is sound, a reset, a crash
+  or a stalled boot is audible. For the component whose job is to warn about
+  braking that cuts both ways: a board that has stopped working announces itself,
+  which is not the worst behaviour a safety warning could have, but it also means
+  every reset is a scream. Worth deciding on deliberately when AEB is built
+  rather than discovering it in the middle of a demonstration.
+
+### Photos
+
+| File | What it shows |
+|---|---|
+| `phase3-fully-wired-vehicle.jpg` | The vehicle with every module on it and the wiring finished. The ultrasonic sensor and both line sensor boards are at the front, the line sensors hanging low toward the ground; the two decks carry the breadboards, the expansion board and the ESP32; the battery pack is at the back |
+
+### Next up
+Phase 4 — Wi-Fi control from the phone, with a watchdog stop. Two pieces of bench
+code come out before or during it: the full-duty motor burst and the test beep,
+both marked temporary in the firmware.

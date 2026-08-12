@@ -3,12 +3,11 @@
 A small autonomous rover that demonstrates two active automotive safety systems —
 **Autonomous Emergency Braking (AEB)** and **Lane Keeping Assist (LKA)** — on an ESP32.
 
-> 🚧 **Status:** In active development. **The rover drives** — the chassis is assembled
-> and all four motors run under PWM control in the right direction, on a split supply.
-> Both line sensors and the ultrasonic sensor are calibrated and reading, inside one
-> non-blocking loop alongside the brake light, status LED and mode button. The OLED is
-> the one part still outstanding: its wiring and address were proven with a bus scanner,
-> but the module itself has a failed ribbon bond and a replacement is on order.
+> 🚧 **Status:** In active development. **The rover is fully wired, and every component
+> has been seen working on it** — four motors under PWM on a split supply, both line
+> sensors and the ultrasonic sensor calibrated at their mounted height, the OLED drawing
+> its test screen, and the brake lights, status LED, mode button and buzzer all verified
+> in place. The pin map is full. Next is Wi-Fi control from the phone.
 > See the [roadmap](#roadmap).
 
 SafeRover runs two independent closed control loops (sense → decide → act) on top of a
@@ -58,7 +57,7 @@ remotely-viewable history.
 | Motor driver | L298N + 4× DC motors (4WD, driven as 2 channels) |
 | Distance | HC-SR04 ultrasonic |
 | Lane sensing | 2× TCRT5000 IR |
-| Display | 0.91" I²C OLED — controller not yet identified (SSD1306 or SH110X) |
+| Display | 0.91" I²C OLED — SSD1306, 128×32, at `0x3C` |
 | Indicators | brake LEDs, buzzer, status LED |
 | Input | physical mode button |
 
@@ -77,10 +76,10 @@ when the motors spike current. The chassis's own 4×AA holder is not used.
 
 **The display.** Confirmed in phase 2: a 128×32 SSD1306 answering at `0x3C`, found with
 the bus scanner in [`tools/i2c_scanner/`](tools/i2c_scanner/) rather than assumed from a
-datasheet. The panel renders correctly, but only while the module is squeezed by hand —
-the ribbon bonding its driver to the glass has come loose, which is a factory heat-press
-joint and not something that can be resoldered. A replacement is on order; the firmware
-needs no change.
+datasheet. The first module failed — the ribbon bonding its driver to the glass came
+loose, a factory heat-press joint that cannot be resoldered, and it would render only
+while the module was squeezed by hand. A replacement of the same part works with the
+firmware unchanged, which is what confirmed the fault was physical rather than software.
 
 <details>
 <summary><b>Planned pin map (wiring contract)</b></summary>
@@ -92,7 +91,7 @@ needs no change.
 | HC-SR04 | TRIG / ECHO | 5 / 18 | ECHO via a 1k/2k voltage divider |
 | Line sensor L / R | AO / AO | 34 / 35 | analog, ADC1, input-only pins |
 | OLED | SDA / SCL | 21 / 22 | I²C — confirm address with a scanner |
-| Buzzer | + | 4 | |
+| Buzzer | I/O | 4 | active-low module — driven **high** to stay silent |
 | Brake LEDs | anode | 19 | via 220 Ω each |
 | Status LED | anode | 13 | via 220 Ω |
 | Mode button | — | 23 | `INPUT_PULLUP` (pressed = LOW) |
@@ -180,7 +179,7 @@ pio run -e i2c-scanner -t upload
 |:-----:|-----------|:------:|
 | 0 | Environment — toolchain + Blink compiles | ✅ |
 | 1 | GPIO basics — Serial, button, LED, PWM | ✅ |
-| 2 | Sensors on the bench — OLED, ultrasonic, line sensors | 🔄 |
+| 2 | Sensors on the bench — OLED, ultrasonic, line sensors | ✅ |
 | 3 | Vehicle moves — chassis, power, straight-line trim | ✅ |
 | 4 | Phone control — Wi-Fi dashboard + watchdog stop | ⬜ |
 | 5 | AEB — 3-stage braking + hysteresis | ⬜ |
@@ -195,7 +194,7 @@ pio run -e i2c-scanner -t upload
 the serial output captured while the line sensors were being calibrated, and the chassis
 coming together.
 
-![The assembled rover: four motors on the lower deck, the L298N and battery pack mounted, control wires running to the ESP32](photos/phase3-wired-for-direction-test.jpg)
+![The finished rover: a two-deck acrylic chassis on four wheels, with the ultrasonic sensor and both line sensor boards at the front, the breadboards and ESP32 across the two decks, and the battery pack at the back](photos/phase3-fully-wired-vehicle.jpg)
 
 A build log with the measurements and the faults hit along the way is in
 [`docs/journal.md`](docs/journal.md).
