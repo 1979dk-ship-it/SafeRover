@@ -551,10 +551,19 @@ void setup() {
   // so every instruction that runs before this one is an instruction spent
   // making noise. Serial.begin() alone is long enough to hear.
   //
-  // The output latch is set before the pin becomes an output, so it drives the
-  // silent level as it switches rather than passing through the active one.
-  digitalWrite(PIN_BUZZER, BUZZER_SILENT);
+  // The order is forced by the core and cannot be inverted. A write to a pin
+  // that has not been configured yet is dropped rather than queued: the
+  // peripheral manager does not recognise the pin, gpio_set_level is never
+  // reached, and the call only logs an error. Setting the latch ahead of
+  // pinMode is an AVR habit, and here it silently did nothing - the pin stayed
+  // at the sounding level through the whole of setup, and the boot log said so
+  // on every reset.
+  //
+  // So the pin passes through its default low, which is the level that sounds,
+  // for the microseconds between these two lines. That is as short as the
+  // window gets.
   pinMode(PIN_BUZZER, OUTPUT);
+  digitalWrite(PIN_BUZZER, BUZZER_SILENT);
 
   Serial.begin(SERIAL_BAUD);
 
@@ -599,8 +608,18 @@ void setup() {
   pinMode(PIN_ULTRASONIC_ECHO, INPUT);
 
   analogReadResolution(ADC_RESOLUTION_BITS);
-  analogSetPinAttenuation(PIN_LINE_SENSOR_LEFT, ADC_11db);
-  analogSetPinAttenuation(PIN_LINE_SENSOR_RIGHT, ADC_11db);
+
+  // Set as the default for channels not opened yet, rather than per pin. The
+  // per-pin form reconfigures a channel that already exists, and the core only
+  // opens an ADC channel on the first analogRead of that pin - so calling it
+  // here, ahead of any read, found nothing to reconfigure and was dropped with
+  // an error on every boot. This form sets the value the channels are built
+  // with.
+  //
+  // It is also the core's own default, so the readings were never wrong and
+  // the calibration figures above still stand. What was wrong was code that
+  // claimed to set something it was not setting.
+  analogSetAttenuation(ADC_11db);
 
   // The bus is opened here, with the pins named, rather than left to the
   // library. The last argument tells begin() not to call Wire.begin() itself:
