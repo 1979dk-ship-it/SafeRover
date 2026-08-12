@@ -7,12 +7,12 @@
 // Phase 2 — two line sensors on GPIO 34 and 35, read and reported together with
 // the difference between them. Their reference values have been measured on the
 // bench; see the comment beside the pin definitions. Phase 2 also brings up the
-// HC-SR04 on GPIO 5 and 18, which reports the echo pulse next to the distance it
-// converts to, median-filtered over three samples. Still data collection only:
-// there are no thresholds and no driving decisions in this file yet.
-// Pins follow the wiring contract in README.md. GPIO 16/17 from the original
-// plan are not broken out on this 30-pin board, so the brake light is on 19
-// and the status LED on 13.
+// HC-SR04 on GPIO 5 and 18, which reports the echo pulse next to the distance
+// it converts to, median-filtered over three samples. Still data collection
+// only: there are no thresholds and no driving decisions in this file yet. Pins
+// follow the wiring contract in README.md. GPIO 16/17 from the original plan
+// are not broken out on this 30-pin board, so the brake light is on 19 and the
+// status LED on 13.
 //
 // The PWM here runs on the brake light only because it is already wired and the
 // result is visible. In the finished rover the brake light is on/off, and this
@@ -22,6 +22,27 @@
 constexpr uint8_t PIN_BRAKE_LIGHT = 19;
 constexpr uint8_t PIN_STATUS_LED = 13;
 constexpr uint8_t PIN_MODE_BUTTON = 23;
+
+// The AEB warning output. This is a three-pin module — GND, I/O, VCC — with a
+// transistor on the board, so the I/O line is a control input and draws very
+// little current from the pin. The buzzer is the active kind, with its own
+// oscillator inside, so holding the pin HIGH is enough to make a sound. It needs
+// neither tone() nor PWM, and driving it with either would only fight the
+// oscillator it already has.
+constexpr uint8_t PIN_BUZZER = 4;
+
+// These modules are sold in both polarities and this one was settled by test,
+// not by assumption: with the pin driven LOW it sounds, so LOW is the active
+// level and it needs a HIGH to stay quiet.
+//
+// The consequence worth knowing is that an undriven pin is not a quiet one. The
+// module sounded continuously from the moment it was wired, before any firmware
+// touched GPIO 4, and it will do the same in the window between a reset and the
+// line below that silences it. For the AEB stage that cuts both ways: a crashed
+// or resetting board announces itself, which is not the worst behaviour for a
+// safety warning, but it also means silence depends on the firmware being alive.
+constexpr uint8_t BUZZER_SOUND = LOW;
+constexpr uint8_t BUZZER_SILENT = HIGH;
 
 // --- L298N motor driver ---
 // Four motors on two channels: the two on each side are wired in parallel into
@@ -42,10 +63,10 @@ constexpr uint8_t PIN_MOTOR_ENB = 14; // right side speed
 // it.
 //
 // Nothing is applied yet, on purpose. A 15% boost on the right was tried and
-// overshot visibly, which puts the real figure somewhere below that but does not
-// say where. Guessing again would just trade one wrong number for another. The
-// value gets measured on a straight run over a marked distance, once the rover
-// drives on the floor rather than on a stand.
+// overshot visibly, which puts the real figure somewhere below that but does
+// not say where. Guessing again would just trade one wrong number for another.
+// The value gets measured on a straight run over a marked distance, once the
+// rover drives on the floor rather than on a stand.
 
 // Both line sensors sit on ADC1. ADC2 cannot be used while Wi-Fi is running
 // because it shares hardware with the radio, so every analog sensor in this
@@ -60,12 +81,12 @@ constexpr uint8_t PIN_MOTOR_ENB = 14; // right side speed
 // black tape. Optical return depends on the material and on the geometry, so a
 // bench measurement over generic paper does not describe this setup.
 //
-// The direction is the opposite of the intuitive one — a HIGH value means a DARK
-// surface. The rover runs inside a white lane marked by two black stripes, one
-// sensor to a side, so while it stays in the lane both sensors read low. A high
-// reading means that sensor has reached a stripe, which is what a deviation
-// looks like. The last two rows below are those deviation cases; neither of them
-// is a centred reference.
+// The direction is the opposite of the intuitive one — a HIGH value means a
+// DARK surface. The rover runs inside a white lane marked by two black stripes,
+// one sensor to a side, so while it stays in the lane both sensors read low. A
+// high reading means that sensor has reached a stripe, which is what a
+// deviation looks like. The last two rows below are those deviation cases;
+// neither of them is a centred reference.
 //
 //   both over white    L ~1417   R ~1691
 //   left over black    L ~3250   R ~1677
@@ -79,9 +100,9 @@ constexpr uint8_t PIN_MOTOR_ENB = 14; // right side speed
 // measurements the value drifts by up to 65.
 //
 // White and black stay well apart under that drift. A threshold shared by both
-// sensors works — anything from 1691 to 3250 classifies every reading correctly,
-// with about 780 counts of margin in the worst case. What survives the drift is
-// that separation, not the absolute values.
+// sensors works — anything from 1691 to 3250 classifies every reading
+// correctly, with about 780 counts of margin in the worst case. What survives
+// the drift is that separation, not the absolute values.
 //
 // What the code must not assume is that the two are interchangeable. They read
 // 274 counts apart over the same white, so the raw difference L - R rests at
@@ -157,21 +178,23 @@ Adafruit_SSD1306 display(OLED_WIDTH, OLED_HEIGHT, &Wire, OLED_RESET_PIN,
                          I2C_CLOCK_HZ, I2C_CLOCK_HZ);
 
 // --- Ultrasonic filtering ---
-// Each measurement takes three samples and keeps the middle one. A median rather
-// than an average, because the two fail differently: an average is dragged toward
-// a bad sample in proportion to how bad it is, while a median steps over it — one
-// wild value out of three cannot end up in the middle. That distinction matters
-// because ultrasonic errors have exactly that shape. A missed echo, or one picked
-// up off a wall at an angle, lands far from the truth rather than slightly off
-// it, so a single one visibly moves an average and does not move a median at all.
+// Each measurement takes three samples and keeps the middle one. A median
+// rather than an average, because the two fail differently: an average is
+// dragged toward a bad sample in proportion to how bad it is, while a median
+// steps over it — one wild value out of three cannot end up in the middle. That
+// distinction matters because ultrasonic errors have exactly that shape. A
+// missed echo, or one picked up off a wall at an angle, lands far from the
+// truth rather than slightly off it, so a single one visibly moves an average
+// and does not move a median at all.
 constexpr uint8_t DISTANCE_SAMPLES = 3;
 
 // How many of those samples have to come back with an echo before the result
 // counts as a measurement at all.
 constexpr uint8_t DISTANCE_MIN_VALID_SAMPLES = 2;
 
-// The bursts need spacing, or the next measurement hears the tail of the previous
-// one still bouncing around the room and reads it as a much closer object.
+// The bursts need spacing, or the next measurement hears the tail of the
+// previous one still bouncing around the room and reads it as a much closer
+// object.
 constexpr unsigned long SAMPLE_SPACING_MS = 5;
 
 // --- ADC ---
@@ -195,7 +218,7 @@ constexpr uint8_t LINE_SENSOR_SAMPLES = 16;
 // their own, so they are reserved here on channels that sit on separate timers.
 // Declared before the L298N is wired so the allocation cannot be taken by
 // accident later.
-constexpr uint8_t PWM_CHANNEL_BRAKE = 0;                        // timer 0
+constexpr uint8_t PWM_CHANNEL_BRAKE = 0;       // timer 0
 constexpr uint8_t PWM_CHANNEL_MOTOR_LEFT = 2;  // timer 1, ENA
 constexpr uint8_t PWM_CHANNEL_MOTOR_RIGHT = 4; // timer 2, ENB
 // 5 kHz is far above the rate the eye can follow, so the light looks steady
@@ -212,34 +235,26 @@ constexpr unsigned long BRAKE_STEP_INTERVAL_MS = 1000;
 constexpr unsigned long LINE_PRINT_INTERVAL_MS = 200;
 constexpr unsigned long DISTANCE_READ_INTERVAL_MS = 100;
 
-// --- Motor direction check (TEMPORARY) ---
-// A bench sequence for reading which way each side actually turns, to be removed
-// once the directions are confirmed and real driving replaces it.
+// --- Full-power motor check (TEMPORARY) ---
+// All four motors forward together at full duty for one fixed burst, then
+// stopped. The earlier version stepped through one side at a time to establish
+// which way each turns; that is settled, so what is left to watch for is
+// whether all four reach full speed together and whether the driver heats.
 //
-// Half speed: fast enough that the direction is unmistakable, slow enough that
-// the rover does not run off the table while it is being watched.
-constexpr uint8_t MOTOR_TEST_PERCENT = 50;
+// One shot rather than a repeating cycle. At full duty a sequence that restarts
+// on its own is a rover that spins up when nobody is expecting it to.
+//
+// It runs from power-up, which means it also runs after every upload, because
+// flashing resets the board. Lift the wheels clear before connecting USB.
+constexpr uint8_t MOTOR_TEST_PERCENT = 100;
 constexpr int16_t MOTOR_TEST_DUTY =
     static_cast<int16_t>((MOTOR_TEST_PERCENT * PWM_MAX_DUTY) / 100);
-constexpr unsigned long MOTOR_TEST_STEP_MS = 2000;
+constexpr unsigned long MOTOR_TEST_RUN_MS = 5000;
 
-// One side at a time first: driving both together would hide a side that turns
-// the wrong way, because the rover would still move, just not as expected.
-struct MotorTestStep {
-  int16_t left;
-  int16_t right;
-  const char *label;
-};
-
-constexpr MotorTestStep MOTOR_TEST_STEPS[] = {
-    {MOTOR_TEST_DUTY, 0, "LEFT side forward"},
-    {0, MOTOR_TEST_DUTY, "RIGHT side forward"},
-    {MOTOR_TEST_DUTY, MOTOR_TEST_DUTY, "BOTH sides forward"},
-    {0, 0, "STOP"},
-};
-
-constexpr size_t MOTOR_TEST_STEP_COUNT =
-    sizeof(MOTOR_TEST_STEPS) / sizeof(MOTOR_TEST_STEPS[0]);
+// --- Buzzer check (TEMPORARY) ---
+// Long enough to be unmistakable in a quiet room, short enough not to be a
+// nuisance at every boot.
+constexpr unsigned long BUZZER_TEST_MS = 300;
 
 // Chosen to sit above the 1-20 ms a tactile switch typically bounces for, and
 // below the 100-150 ms gap between even fast human presses, so genuine presses
@@ -254,9 +269,9 @@ constexpr unsigned long SERIAL_BAUD = 115200;
 // be watched without four other tasks scrolling them off the screen. Only the
 // printing is suppressed: the brake light, the button, the motor sequence and
 // the distance measurement all still run exactly as before, so the loop timing
-// stays representative. One-off messages at boot are left alone — they fire once
-// and they are how you know the board actually restarted.
-constexpr bool SERIAL_VERBOSE = false;
+// stays representative. One-off messages at boot are left alone — they fire
+// once and they are how you know the board actually restarted.
+constexpr bool SERIAL_VERBOSE = true;
 
 // Brightness steps the brake light cycles through, as percentages.
 constexpr uint8_t BRAKE_DUTY_PERCENTS[] = {25, 50, 75, 100};
@@ -276,10 +291,10 @@ unsigned long lastButtonChange = 0;
 unsigned long lastLinePrint = 0;
 unsigned long lastDistanceRead = 0;
 
-// Starts on the last step, which is the stop, so the wheels are still at
-// power-up and the sequence only begins after the first interval has passed.
-unsigned long lastMotorTestStep = 0;
-size_t motorTestIndex = MOTOR_TEST_STEP_COUNT - 1;
+// Set when the burst starts at the end of setup(). The flag is what makes the
+// stop happen exactly once instead of on every pass afterwards.
+unsigned long motorTestStart = 0;
+bool motorTestRunning = false;
 
 // Percentages are the readable unit; the hardware wants raw counts.
 static uint32_t dutyFromPercent(uint8_t percent) {
@@ -298,13 +313,14 @@ static void applyBrakeDuty(size_t index) {
 }
 
 // Sets both sides at once. Each argument carries speed in its magnitude and
-// direction in its sign, so one number per side says everything about that side.
+// direction in its sign, so one number per side says everything about that
+// side.
 //
 // The two direction pins of a side are driven to opposite levels; which pattern
 // means forward depends on which way round the motor leads were connected, and
-// that is exactly what the bench sequence below is for. Setting both pins to the
-// same level would brake the side rather than turn it, which is why they are
-// always written as a pair.
+// that is exactly what the bench sequence below is for. Setting both pins to
+// the same level would brake the side rather than turn it, which is why they
+// are always written as a pair.
 static void drive(int16_t left, int16_t right) {
   const bool leftForward = (left >= 0);
   digitalWrite(PIN_MOTOR_IN1, leftForward ? HIGH : LOW);
@@ -318,22 +334,11 @@ static void drive(int16_t left, int16_t right) {
   // left for the speed. abs() on the full negative range of int16_t would
   // overflow, but these values are bounded by PWM_MAX_DUTY long before that.
   const uint32_t leftDuty = static_cast<uint32_t>(leftForward ? left : -left);
-  const uint32_t rightDuty = static_cast<uint32_t>(rightForward ? right : -right);
+  const uint32_t rightDuty =
+      static_cast<uint32_t>(rightForward ? right : -right);
 
   ledcWrite(PIN_MOTOR_ENA, min(leftDuty, PWM_MAX_DUTY));
   ledcWrite(PIN_MOTOR_ENB, min(rightDuty, PWM_MAX_DUTY));
-}
-
-// TEMPORARY — remove with the rest of the direction check.
-static void applyMotorTestStep(size_t index) {
-  const MotorTestStep &step = MOTOR_TEST_STEPS[index];
-  drive(step.left, step.right);
-
-  // Printed so what is seen on the bench can be matched to what was asked for.
-  if (SERIAL_VERBOSE) {
-    Serial.print("MOTOR TEST  ");
-    Serial.println(step.label);
-  }
 }
 
 // One reader for both sensors — they are the same part on the same ADC, so the
@@ -369,9 +374,9 @@ static unsigned long readEchoDuration() {
 // Takes DISTANCE_SAMPLES measurements and returns the median of the ones that
 // came back, or 0 when too few of them did.
 //
-// The delay between samples is part of the measuring protocol, in the same sense
-// as the microsecond delays inside the trigger pulse: a burst fired before the
-// previous one has died away measures the old echo, not the new one.
+// The delay between samples is part of the measuring protocol, in the same
+// sense as the microsecond delays inside the trigger pulse: a burst fired
+// before the previous one has died away measures the old echo, not the new one.
 static unsigned long readEchoMedian() {
   unsigned long valid[DISTANCE_SAMPLES];
   uint8_t validCount = 0;
@@ -413,10 +418,11 @@ static unsigned long readEchoMedian() {
     valid[j] = key;
   }
 
-  // An odd count has a real middle. An even one does not, and the tie-break here
-  // is the lower of the two: averaging them would let a bad sample pull the
-  // result, which is the whole thing the median was chosen to avoid, and of two
-  // candidate distances the nearer one is the safe one for a brake to act on.
+  // An odd count has a real middle. An even one does not, and the tie-break
+  // here is the lower of the two: averaging them would let a bad sample pull
+  // the result, which is the whole thing the median was chosen to avoid, and of
+  // two candidate distances the nearer one is the safe one for a brake to act
+  // on.
   const uint8_t medianIndex =
       (validCount % 2 == 1) ? (validCount / 2) : (validCount / 2 - 1);
 
@@ -435,8 +441,8 @@ static float distanceFromDuration(unsigned long durationUs) {
 // Every call below writes into a pixel buffer held in the ESP32's own RAM —
 // nothing reaches the panel until display() pushes that whole buffer out over
 // I2C. display() is therefore the expensive operation, and the only one whose
-// cost scales with the bus rather than the CPU. In the finished firmware it gets
-// called when the content actually changes, never once per loop pass.
+// cost scales with the bus rather than the CPU. In the finished firmware it
+// gets called when the content actually changes, never once per loop pass.
 static void showTestScreen() {
   display.clearDisplay();
 
@@ -468,6 +474,15 @@ static void showTestScreen() {
 }
 
 void setup() {
+  // First, before anything else: the buzzer sounds while its pin is undriven, so
+  // every instruction that runs before this one is an instruction spent making
+  // noise. Serial.begin() alone is long enough to hear.
+  //
+  // The output latch is set before the pin becomes an output, so it drives the
+  // silent level as it switches rather than passing through the active one.
+  digitalWrite(PIN_BUZZER, BUZZER_SILENT);
+  pinMode(PIN_BUZZER, OUTPUT);
+
   Serial.begin(SERIAL_BAUD);
 
   // Binding the channel explicitly rather than letting the core pick one, so
@@ -538,6 +553,37 @@ void setup() {
   Serial.println(PIN_BRAKE_LIGHT);
 
   applyBrakeDuty(brakeDutyIndex);
+
+  // TEMPORARY — one beep, to prove the buzzer works at all. It is the only part
+  // in the project that has never been tested, on the bench or on the vehicle,
+  // and nothing else in the firmware drives this pin until the AEB stage in
+  // phase 5. Without this it would stay unverified until the moment it is needed
+  // for something real. Remove it when AEB takes the pin over.
+  //
+  // delay() is allowed here. The rule against it applies to the main loop, where
+  // blocking means the sensors stop being read; setup() runs once before that
+  // loop starts and holds nothing up.
+  if (SERIAL_VERBOSE) {
+    Serial.print("BUZZER TEST  ");
+    Serial.print(BUZZER_TEST_MS);
+    Serial.println(" ms beep on GPIO 4");
+  }
+
+  digitalWrite(PIN_BUZZER, BUZZER_SOUND);
+  delay(BUZZER_TEST_MS);
+  digitalWrite(PIN_BUZZER, BUZZER_SILENT);
+
+  // TEMPORARY — the full-power burst, started last so that nothing else in
+  // setup() eats into the run time that loop() is now timing.
+  Serial.print("MOTOR TEST  all four forward at ");
+  Serial.print(MOTOR_TEST_PERCENT);
+  Serial.print("% for ");
+  Serial.print(MOTOR_TEST_RUN_MS);
+  Serial.println(" ms");
+
+  motorTestStart = millis();
+  motorTestRunning = true;
+  drive(MOTOR_TEST_DUTY, MOTOR_TEST_DUTY);
 }
 
 void loop() {
@@ -564,7 +610,6 @@ void loop() {
     if (SERIAL_VERBOSE) {
       Serial.println(buttonPressed ? "BUTTON PRESSED" : "BUTTON RELEASED");
     }
-    
   }
 
   // Data collection only: read and report. No thresholds, no decisions.
@@ -589,25 +634,26 @@ void loop() {
     Serial.println(delta);
   }
 
-  // TEMPORARY — the motor direction check. Remove once each side is confirmed
-  // to turn the way the code believes it does.
-  if (now - lastMotorTestStep >= MOTOR_TEST_STEP_MS) {
-    lastMotorTestStep = now;
+  // TEMPORARY — ends the full-power burst that setup() started. Subtracting the
+  // two millis() values rather than comparing them keeps this correct across the
+  // counter's rollover, the same as every other timer in this loop.
+  if (motorTestRunning && now - motorTestStart >= MOTOR_TEST_RUN_MS) {
+    drive(0, 0);
+    motorTestRunning = false;
 
-    motorTestIndex = (motorTestIndex + 1) % MOTOR_TEST_STEP_COUNT;
-    applyMotorTestStep(motorTestIndex);
+    Serial.println("MOTOR TEST  burst finished, motors stopped");
   }
 
   // Median-filtered now that the raw noise has been characterised on the bench:
   // the unfiltered signal was steady to within a tenth of a percent against a
-  // fixed target, so the filter is not there to smooth a wobble. It is there for
-  // the occasional sample that comes back badly wrong, which is what a moving,
-  // vibrating vehicle will produce.
+  // fixed target, so the filter is not there to smooth a wobble. It is there
+  // for the occasional sample that comes back badly wrong, which is what a
+  // moving, vibrating vehicle will produce.
   if (now - lastDistanceRead >= DISTANCE_READ_INTERVAL_MS) {
     lastDistanceRead = now;
 
-    // Both values get printed: the pulse says whether a bad number came from the
-    // sensor or from the conversion below it.
+    // Both values get printed: the pulse says whether a bad number came from
+    // the sensor or from the conversion below it.
     const unsigned long echoDuration = readEchoMedian();
 
     if (SERIAL_VERBOSE) {
