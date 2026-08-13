@@ -1,10 +1,12 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <Arduino.h>
+#include <WebServer.h>
 #include <WiFi.h>
 #include <Wire.h>
 
 #include "secrets.h"
+#include "web_page.h"
 
 // Phase 1 — brake light on PWM, status LED and mode button.
 // Phase 2 — two line sensors on GPIO 34 and 35, read and reported together with
@@ -314,6 +316,32 @@ constexpr uint8_t WIFI_AP_MAX_CLIENTS = 1;
 constexpr uint8_t WIFI_AP_CHANNEL = 1;
 constexpr bool WIFI_AP_HIDDEN = false;
 
+// --- Web server ---
+// Port 80 is the one a browser assumes when none is given, so the address is
+// the plain IP with nothing after it. Named rather than left as a literal
+// because it also appears in the URL printed at boot, and the two must not
+// drift apart.
+constexpr uint16_t WEB_SERVER_PORT = 80;
+
+// How often the browser asks for fresh numbers. Half a second is quick enough
+// that the values feel live and slow enough that answering them stays cheap:
+// every request is time taken from the loop, and in phase 5 that loop runs the
+// AEB.
+constexpr unsigned long WEB_POLL_INTERVAL_MS = 500;
+
+// How often the loop services the socket. These two constants are coupled, and
+// this one has to stay far below the one above. handleClient() takes at most
+// ONE pending request per call, so if the two rates were close, any hesitation
+// would leave a request waiting, then a second would arrive on top of it, and
+// the backlog would grow instead of draining. A factor of twenty-five leaves
+// room that does not accumulate.
+constexpr unsigned long WEB_HANDLE_INTERVAL_MS = 20;
+
+// Built from the constant above, the same way the display object is built from
+// the panel's. Synchronous by design: it does no work of its own until the loop
+// calls handleClient(), so nothing about it runs behind the scheduler's back.
+WebServer server(WEB_SERVER_PORT);
+
 // Brightness steps the brake light cycles through, as percentages.
 constexpr uint8_t BRAKE_DUTY_PERCENTS[] = {25, 50, 75, 100};
 constexpr size_t BRAKE_DUTY_STEPS =
@@ -331,6 +359,24 @@ unsigned long lastButtonChange = 0;
 
 unsigned long lastLinePrint = 0;
 unsigned long lastDistanceRead = 0;
+unsigned long lastWebHandle = 0;
+
+// The last readings the loop took, held at file scope so a request handler can
+// report them without measuring anything itself.
+//
+// That restriction is the point. Reading a sensor inside a handler would let a
+// browser decide when pulseIn fires, and two ultrasonic bursts close together
+// each measure the other's echo - which is what SAMPLE_SPACING_MS exists to
+// prevent. A phone refreshing a page could then corrupt a distance reading, and
+// from phase 5 that reading works the brakes. Measuring stays the loop's job;
+// the page only reports what the loop already found.
+//
+// echoDurationValue keeps the meaning zero already carries everywhere else in
+// this file: no echo came back, which is not a distance. The page inherits that
+// convention rather than inventing one.
+uint16_t lineLeftValue = 0;
+uint16_t lineRightValue = 0;
+unsigned long echoDurationValue = 0;
 
 // Set when the burst starts at the end of setup(). The flag is what makes the
 // stop happen exactly once instead of on every pass afterwards.
@@ -546,6 +592,72 @@ static void startAccessPoint() {
   Serial.println(WiFi.softAPIP());
 }
 
+// Serves the page. PAGE_HTML is const and cannot be edited where it sits, so it
+// is copied into a String, the interval is substituted in, and the copy is sent
+// and released. That copy costs about 1.5 kB of heap for the length of one page
+// load, not once per reading.
+static void handleRoot() {
+  String page = PAGE_HTML;
+  page.replace("%POLL_MS%", String(WEB_POLL_INTERVAL_MS));
+
+  server.send(200, "text/html", page);
+}
+
+// The readings, as JSON. Assembled by hand rather than with a library: four
+// values do not justify the dependency, and this way the exact bytes going out
+// are visible in the code.
+//
+// A missing echo is sent as null and never as a number. The browser has to be
+// able to tell no reading from zero centimetres, because a zero would describe
+// an obstacle pressed against the sensor - the same distinction the serial
+// output makes when it prints "d=--  no echo", from the same source value.
+//
+// Neither handler measures anything. Both read what the loop last stored.
+static void handleData() {
+  String json = "{\"distance\":";
+
+  if (echoDurationValue == 0) {
+    json += "null";
+  } else {
+    json += String(distanceFromDuration(echoDurationValue), 1);
+  }
+
+  json += ",\"lineLeft\":";
+  json += lineLeftValue;
+  json += ",\"lineRight\":";
+  json += lineRightValue;
+  json += ",\"button\":";
+  json += (lastButtonPressed ? "true" : "false");
+  json += "}";
+
+  server.send(200, "application/json", json);
+}
+
+// Registers the two routes and opens the socket on port 80. Placed after the
+// handlers because it names them, and a function has to be declared before it
+// can be referred to.
+//
+// on() does not run anything now. It fills in a routing table: when a GET for
+// this path arrives, call that function. The method is given explicitly rather
+// than left as HTTP_ANY, because both of these only read state. That
+// distinction starts to matter in the next step, when a request that moves a
+// motor must not be a GET.
+//
+// Nothing here reports failure, and saying so is more honest than an if that
+// always passes. WebServer::begin() returns void. The socket underneath does
+// track whether it is listening, but that flag is protected and the class
+// exposes no accessor. The first request the browser makes is the real proof,
+// and the address printed below is how to make one.
+static void startWebServer() {
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/data", HTTP_GET, handleData);
+  server.begin();
+
+  Serial.print("WEB SERVER up  http://");
+  Serial.print(WiFi.softAPIP());
+  Serial.println("/");
+}
+
 void setup() {
   // First, before anything else: the buzzer sounds while its pin is undriven,
   // so every instruction that runs before this one is an instruction spent
@@ -642,6 +754,7 @@ void setup() {
   }
 
   startAccessPoint();
+  startWebServer();
 
   Serial.print("SafeRover boot OK - brake light PWM on GPIO ");
   Serial.println(PIN_BRAKE_LIGHT);
@@ -710,20 +823,20 @@ void loop() {
   if (now - lastLinePrint >= LINE_PRINT_INTERVAL_MS) {
     lastLinePrint = now;
 
-    const uint16_t left = readLineAveraged(PIN_LINE_SENSOR_LEFT);
-    const uint16_t right = readLineAveraged(PIN_LINE_SENSOR_RIGHT);
+    lineLeftValue = readLineAveraged(PIN_LINE_SENSOR_LEFT);
+    lineRightValue = readLineAveraged(PIN_LINE_SENSOR_RIGHT);
 
     // A bench aid, not a control input. Both sensors read white while the rover
     // is inside the lane, so this difference rests at a non-zero constant there
     // and only moves once one of them reaches a stripe. How the LKA turns the
     // two readings into an error signal is still open.
-    const int16_t delta =
-        static_cast<int16_t>(left) - static_cast<int16_t>(right);
+    const int16_t delta = static_cast<int16_t>(lineLeftValue) -
+                          static_cast<int16_t>(lineRightValue);
 
     Serial.print("LINE  L=");
-    Serial.print(left);
+    Serial.print(lineLeftValue);
     Serial.print("  R=");
-    Serial.print(right);
+    Serial.print(lineRightValue);
     Serial.print("  delta=");
     Serial.println(delta);
   }
@@ -748,23 +861,54 @@ void loop() {
 
     // Both values get printed: the pulse says whether a bad number came from
     // the sensor or from the conversion below it.
-    const unsigned long echoDuration = readEchoMedian();
+    echoDurationValue = readEchoMedian();
 
     if (SERIAL_VERBOSE) {
       Serial.print("DIST  echo=");
-      Serial.print(echoDuration);
+      Serial.print(echoDurationValue);
       Serial.print("us  ");
 
       // A timeout is not a distance. Converting the 0 would print 0.0 cm, which
       // reads exactly like an obstacle pressed against the sensor — the most
       // dangerous possible misreading once this drives the brakes.
-      if (echoDuration == 0) {
+      if (echoDurationValue == 0) {
         Serial.println("d=--  no echo");
       } else {
         Serial.print("d=");
-        Serial.print(distanceFromDuration(echoDuration), 1);
+        Serial.print(distanceFromDuration(echoDurationValue), 1);
         Serial.println("cm");
       }
     }
+  }
+
+  // Answers whatever the browser has asked for, and it is the only moment the
+  // server does anything at all. It has no task and no timer of its own; it sits
+  // still until this line gives it a turn. That is why a synchronous server was
+  // chosen over an asynchronous one - the scheduler stays in charge, and no
+  // request handler can interrupt a distance measurement. From phase 5 that is
+  // not a detail, it is what makes the braking timing something that can be
+  // reasoned about at all.
+  //
+  // Last in the loop on purpose, so it serves the values this pass just took
+  // rather than the previous pass's.
+  //
+  // One thing this is NOT free of: with no request waiting, handleClient() calls
+  // delay(1) before returning. The library assumes a loop that does nothing else
+  // and needs somewhere to yield to FreeRTOS - and on a dual-core ESP32 the
+  // Arduino loop task never yields on its own, so that assumption is not
+  // unreasonable. server.enableDelay(false) removes it, and it is left on
+  // deliberately. Switching it off makes yielding this loop's job, and the only
+  // yield left would be the delay inside readEchoMedian, which is there to space
+  // ultrasonic bursts rather than to feed the scheduler and which disappears the
+  // day that measurement is made non-blocking. Turning it off belongs in the
+  // same change as an explicit yield of our own, not in this one.
+  //
+  // It also adds work to the loop. Nothing beside pulseIn today, which blocks
+  // for up to 25 ms, but by phase 7 it stacks with that and with the sixteen
+  // samples the line sensors take, and the three together are what the AEB
+  // timing will have to survive.
+  if (now - lastWebHandle >= WEB_HANDLE_INTERVAL_MS) {
+    lastWebHandle = now;
+    server.handleClient();
   }
 }
