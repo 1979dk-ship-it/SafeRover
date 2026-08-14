@@ -246,23 +246,7 @@ constexpr unsigned long BRAKE_STEP_INTERVAL_MS = 1000;
 constexpr unsigned long LINE_PRINT_INTERVAL_MS = 200;
 constexpr unsigned long DISTANCE_READ_INTERVAL_MS = 100;
 
-// --- Full-power motor check (TEMPORARY) ---
-// All four motors forward together at full duty for one fixed burst, then
-// stopped. The earlier version stepped through one side at a time to establish
-// which way each turns; that is settled, so what is left to watch for is
-// whether all four reach full speed together and whether the driver heats.
-//
-// One shot rather than a repeating cycle. At full duty a sequence that restarts
-// on its own is a rover that spins up when nobody is expecting it to.
-//
-// It runs from power-up, which means it also runs after every upload, because
-// flashing resets the board. Lift the wheels clear before connecting USB.
-constexpr uint8_t MOTOR_TEST_PERCENT = 100;
-constexpr int16_t MOTOR_TEST_DUTY =
-    static_cast<int16_t>((MOTOR_TEST_PERCENT * PWM_MAX_DUTY) / 100);
-constexpr unsigned long MOTOR_TEST_RUN_MS = 5000;
-
-// --- Buzzer check (TEMPORARY) ---
+// --- Buzzer self test ---
 // Long enough to be unmistakable in a quiet room, short enough not to be a
 // nuisance at every boot.
 constexpr unsigned long BUZZER_TEST_MS = 300;
@@ -377,11 +361,6 @@ unsigned long lastWebHandle = 0;
 uint16_t lineLeftValue = 0;
 uint16_t lineRightValue = 0;
 unsigned long echoDurationValue = 0;
-
-// Set when the burst starts at the end of setup(). The flag is what makes the
-// stop happen exactly once instead of on every pass afterwards.
-unsigned long motorTestStart = 0;
-bool motorTestRunning = false;
 
 // Percentages are the readable unit; the hardware wants raw counts.
 static uint32_t dutyFromPercent(uint8_t percent) {
@@ -761,11 +740,14 @@ void setup() {
 
   applyBrakeDuty(brakeDutyIndex);
 
-  // TEMPORARY — one beep, to prove the buzzer works at all. It is the only part
-  // in the project that has never been tested, on the bench or on the vehicle,
-  // and nothing else in the firmware drives this pin until the AEB stage in
-  // phase 5. Without this it would stay unverified until the moment it is
-  // needed for something real. Remove it when AEB takes the pin over.
+  // A power-on self test, and a permanent one. It began as a way to prove the
+  // buzzer worked at all, and the reason to keep it arrived later: its VCC is
+  // unplugged by hand before every upload, because esptool holds the board in
+  // ROM download mode where no firmware of ours runs to silence the pin.
+  // Anything unplugged by hand can be left unplugged, and the AEB would then
+  // warn in silence with nothing wrong in the code to find. This beep is what
+  // says the wire went back. A module that dies quietly is a fault this project
+  // has already had once, in the display.
   //
   // delay() is allowed here. The rule against it applies to the main loop,
   // where blocking means the sensors stop being read; setup() runs once before
@@ -779,18 +761,6 @@ void setup() {
   digitalWrite(PIN_BUZZER, BUZZER_SOUND);
   delay(BUZZER_TEST_MS);
   digitalWrite(PIN_BUZZER, BUZZER_SILENT);
-
-  // TEMPORARY — the full-power burst, started last so that nothing else in
-  // setup() eats into the run time that loop() is now timing.
-  Serial.print("MOTOR TEST  all four forward at ");
-  Serial.print(MOTOR_TEST_PERCENT);
-  Serial.print("% for ");
-  Serial.print(MOTOR_TEST_RUN_MS);
-  Serial.println(" ms");
-
-  motorTestStart = millis();
-  motorTestRunning = true;
-  drive(MOTOR_TEST_DUTY, MOTOR_TEST_DUTY);
 }
 
 void loop() {
@@ -839,16 +809,6 @@ void loop() {
     Serial.print(lineRightValue);
     Serial.print("  delta=");
     Serial.println(delta);
-  }
-
-  // TEMPORARY — ends the full-power burst that setup() started. Subtracting the
-  // two millis() values rather than comparing them keeps this correct across
-  // the counter's rollover, the same as every other timer in this loop.
-  if (motorTestRunning && now - motorTestStart >= MOTOR_TEST_RUN_MS) {
-    drive(0, 0);
-    motorTestRunning = false;
-
-    Serial.println("MOTOR TEST  burst finished, motors stopped");
   }
 
   // Median-filtered now that the raw noise has been characterised on the bench:
