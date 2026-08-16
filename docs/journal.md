@@ -1441,3 +1441,422 @@ the status LED and the buzzer — and finish the pin map.
 Phase 4 — Wi-Fi control from the phone, with a watchdog stop. Two pieces of bench
 code come out before or during it: the full-duty motor burst and the test beep,
 both marked temporary in the firmware.
+
+---
+
+## Session 16 — 2026-08-12 — The access point, the partition table, and two calls the core was discarding
+
+### Goal
+Start phase 4 with the network alone: bring up a Wi-Fi access point on the rover
+and prove it can be joined. No server, no dashboard, no driving commands.
+
+### What was done
+- The rover now creates its own network rather than joining one. `startAccessPoint()`
+  runs once in `setup()`, in AP mode only, and reports the network name and the
+  address it answers on.
+- Verified from a phone: the network appeared, accepted the passphrase, and the
+  phone associated. The address is 192.168.4.1.
+- The passphrase moved to `src/secrets.h`, which is excluded from Git.
+- The flash filled up far enough to need the partition table changed, and once the
+  new firmware was on the board its boot log turned out to contain three errors
+  that had been printing for some time without anyone reading them.
+
+### Problems & challenges
+
+**Fault 1 — the flash reached 75% with most of the project still unwritten**
+
+- **Symptom:** adding the Wi-Fi stack took the build from 27.8% to 75.0%. Five
+  phases remained, including a web server, a dashboard and a cloud client.
+- **Diagnosis:** the figure was being measured against the wrong thing. The chip
+  holds 4 MB, but the default partition table divides it into two 1.25 MB
+  application slots and 1.375 MB of file storage. The 1,310,720 bytes the build
+  reported against is one of those slots, not the chip. The second slot exists so
+  that an over-the-air update can be written without overwriting the firmware
+  currently running — a mechanism this rover does not use, because it is flashed
+  over USB. The file storage was empty as well. Between them, 2.6 MB of a 4 MB
+  chip were reserved for two things the project does not have.
+- **Solution:** `board_build.partitions = huge_app.csv` in `platformio.ini`. That
+  table ships with the framework, so nothing was added to the repository. It drops
+  the OTA slot and gives the application 3 MB, keeping 0.875 MB of filesystem in
+  case the dashboard is ever served from a file rather than compiled in. The same
+  binary, 982,391 bytes either way, went from 75% to 31%.
+- **Verified:** the board boots from the new layout, reaches `setup()` and brings
+  the access point up.
+
+**Fault 2 — two configuration calls were being discarded, and said so on every boot**
+
+- **Symptom:** the boot log carried three error lines that had never been read:
+
+  ```
+  [26][E] __digitalWrite(): IO 4 is not set as GPIO. Execute digitalMode(4, OUTPUT) first.
+  [40][E] __analogChannelConfig(): Pin is not configured as analog channel
+  [54][E] __analogChannelConfig(): Pin is not configured as analog channel
+  ```
+
+- **Diagnosis:** the core's own source settles it. In `__digitalWrite`, the write
+  only happens when the peripheral manager already knows the pin:
+
+  ```c
+  if (perimanGetPinBus(pin, ESP32_BUS_TYPE_GPIO) != NULL) {
+    gpio_set_level((gpio_num_t)pin, val);
+  } else {
+    log_e("IO %u is not set as GPIO...");
+  }
+  ```
+
+  `gpio_set_level` is never reached. The write is not queued for later, it is
+  thrown away, and only the error is recorded. Setting the output latch before
+  `pinMode` is a habit from classic Arduino boards, where it works; here it does
+  nothing. That is precisely what the previous session had done to silence the
+  buzzer, which means the fix recorded in session 15 never took effect: the pin
+  stayed at its default low — the level that sounds — through the whole of
+  `setup()`, and adding the Wi-Fi bring-up had just made that window longer.
+
+  `analogSetPinAttenuation` fails in the same shape. It reconfigures a channel
+  that already exists, and the core opens an ADC channel lazily, on the first
+  `analogRead` of that pin. Called from `setup()`, ahead of any read, it finds
+  nothing to reconfigure.
+- **Solution:** the buzzer's `pinMode` and `digitalWrite` were swapped into the
+  order the core requires. The per-pin attenuation call was replaced with the
+  global `analogSetAttenuation`, which sets the value channels are created with
+  rather than reconfiguring one that exists.
+- **Confirmed twice over.** The three error lines are gone, and a reset now
+  produces a short beep, then silence while `setup()` runs, then the test beep.
+  That silence in the middle did not exist before: the sound used to be one
+  continuous run from reset until the end of the test.
+- **What it comes down to:** the readings were never wrong. The core's default
+  attenuation is already `ADC_11db`, the value the failed calls were asking for,
+  so every line-sensor figure measured so far still stands. What was wrong was
+  code claiming to set something it was not setting — and a boot log that had been
+  saying so, unread, the whole time.
+
+### Decisions & rationale
+- **An access point rather than a client on an existing network.** A demonstration
+  cannot depend on infrastructure nobody in the room controls. Institutional
+  networks sometimes require a login through a browser, hide their passphrase, or
+  isolate connected devices from one another, and any of those would take the
+  phone control down at the worst possible moment. A network of its own works in
+  any room and always answers at the same address. Phase 8 adds station mode
+  alongside this for the cloud reporting — an addition, not a replacement.
+- **One client at a time, enforced in the radio.** Two operators sending driving
+  commands at once is a genuinely unsafe state: one brakes, the other accelerates,
+  and the rover obeys whichever packet arrived last. Capping the association count
+  means the command code never has to arbitrate between them, because the second
+  phone cannot connect at all.
+- **The passphrase is outside Git.** The repository is public. The network name
+  stays in the source, because an SSID is broadcast over the air anyway and hiding
+  it would protect nothing while making the network harder to find. No example
+  file was added: nobody can clone this and run it without the rover, so a line in
+  the README does the same job.
+- **The OTA slot was given up rather than the filesystem.** A table with no
+  filesystem at all would have given the application 3.875 MB instead of 3 MB, but
+  0.875 MB of storage is worth keeping while it is still open whether the
+  dashboard gets compiled into the firmware or served from a file. At 31% the
+  extra application space buys nothing.
+- **The buzzer's error was reported and left as a comment, not silenced.** The
+  comment beside `pinMode` now states that the order cannot be inverted and why,
+  so the AVR habit does not come back the next time somebody reads that block.
+
+### Next up
+Phase 4 step 2 — a web server on the access point that is already running. Server
+first, driving commands afterwards, so that a failure names itself.
+
+---
+
+## Session 17 — 2026-08-13 — A page that reads the sensors, in one direction only
+
+### Goal
+Put a web server on the access point and serve one page showing the sensor
+readings. One direction: the rover reports and the browser displays. No buttons,
+no driving commands, nothing that touches a motor.
+
+### What was done
+- Two routes. `GET /` serves the page once; `GET /data` answers with the readings
+  as JSON. The page is loaded a single time and then asks only for the data,
+  rewriting four values in place.
+- The page shows the ultrasonic distance, both line sensors and the button state —
+  the only values that exist at this point, since neither AEB nor LKA is written.
+- The markup was put in `src/web_page.h` rather than in the middle of the control
+  code. The CSS and the script stay inside it.
+- The readings the loop takes were moved from local variables to file scope, so a
+  request handler can report them without measuring anything itself.
+- Verified from a phone: the numbers move on their own without refreshing, and
+  pointing the ultrasonic sensor at open space makes the page read `-- no echo`
+  rather than a distance.
+- `WebServer` comes with the ESP32 core and needed no entry in `lib_deps`. The
+  library dependency finder picks it up from the `#include` alone.
+
+### Problems & challenges
+
+**Fault 1 — there is no way to find out whether the server started**
+
+- **Symptom:** the plan called for reporting a failure to start and carrying on
+  without the server. Nothing in the API says whether it started.
+- **Diagnosis:** `WebServer::begin()` is declared `void`. The socket underneath it
+  does track a listening flag — `NetworkServer` has an `operator bool()` that
+  returns it — but the member is `protected` and the class exposes no accessor.
+  Subclassing `WebServer` to read one boolean would be a great deal of machinery
+  for a case that does not really arise: `begin()` here opens a socket on port 80
+  in a sketch with one server and a network that is already up.
+- **Solution:** none, and the comment says so plainly rather than wrapping an `if`
+  around a call that cannot fail. What is printed instead is the full address, and
+  the first request that arrives is the real proof that the server is listening.
+- **What it comes down to:** a check that always passes is worse than no check,
+  because it reads like verification and is not.
+
+**Fault 2 — the Arduino loop does not yield to FreeRTOS on this chip**
+
+- **Symptom:** reading `handleClient()` in the core source turned up a `delay(1)`
+  on the path taken when no request is waiting, which is most of the time. A
+  `delay` inside the main loop contradicts the first convention in this project.
+- **Diagnosis:** it is there on purpose. The ordinary Arduino pattern is a loop
+  that does nothing but call `handleClient()`, and without a yield that loop would
+  spin at full speed and starve every lower-priority task in the system. On the
+  ESP32 `delay()` is not a busy wait: it calls into FreeRTOS and hands the
+  processor to somebody else. Checking whether the loop yields on its own settled
+  the question — in the core's `loopTask` the yield is compiled in only for
+  single-core chips:
+
+  ```c
+  #if CONFIG_FREERTOS_UNICORE
+      yieldIfNecessary();
+  #endif
+  ```
+
+  This is a dual-core ESP32, so that line is not compiled at all. Yielding really
+  is the application's business here, and the library's assumption is reasonable.
+- **Solution:** left switched on, deliberately. `server.enableDelay(false)` would
+  remove it, but then the only yield remaining in the loop would be the `delay`
+  inside `readEchoMedian` — which exists to space ultrasonic bursts apart, not to
+  feed the scheduler, and which disappears the day that measurement is made
+  non-blocking. Turning it off belongs in the same change as an explicit yield of
+  the loop's own, so that there is never a moment where the dependency exists
+  without anybody knowing about it.
+- **What it comes down to:** two distant parts of the code would have depended on
+  each other through something neither of them mentions. The cost of leaving it on
+  is one millisecond in twenty; the cost of switching it off carelessly is a
+  reboot weeks later while somebody is improving the distance sensor.
+
+### Decisions & rationale
+- **The page is loaded once and then asks only for data.** Re-serving the whole
+  document every cycle would put the entire page on the wire where the readings
+  are a few dozen bytes, and every request the server handles is time taken from
+  the loop that runs the AEB from phase 5. It is also the shape the driving
+  commands need in the next step, so building it any other way would mean building
+  it twice.
+- **A synchronous server rather than an asynchronous one.** `WebServer` does
+  nothing at all until the loop calls `handleClient()`. It has no task and no
+  timer of its own, so no request handler can interrupt a distance measurement and
+  the scheduler stays in charge. For a control loop that will be running brakes,
+  that is not a detail of style.
+- **A missing echo is sent as `null` and never as a number.** A zero would
+  describe an obstacle pressed against the sensor, which is the most dangerous
+  misreading in the project. The page compares with `===`, so a distance of zero
+  and no reading at all can never be taken for one another. This is the same
+  convention the serial output already uses when it prints `d=--`.
+- **Handlers report, they do not measure.** Reading a sensor inside a request
+  handler would let a browser decide when `pulseIn` fires, and two ultrasonic
+  bursts close together each measure the other's echo. Measuring stays the loop's
+  job at its own rate; the page only reports what the loop already found.
+- **The two rates are coupled and the comment says so.** `handleClient()` takes at
+  most one pending request per call, so the interval it runs at has to stay well
+  below the rate the browser polls at, or requests arrive faster than they are
+  answered. Twenty milliseconds against five hundred leaves room that does not
+  accumulate.
+- **The markup moved to its own file; the script and styles did not.** Sixty lines
+  of markup in the middle of the control code make the control code harder to
+  read, and the web module this project is heading for wants the page as a file
+  anyway. Splitting the script out as well would cost a second HTTP request per
+  page load for a document of about 1.5 kB — worth doing only once the page is
+  large enough to be worth caching, which is what the filesystem partition is
+  being kept for.
+
+### Next up
+Phase 4 step 3 — driving commands and a watchdog stop. The sensitive step: from
+that point a fault in the communication channel becomes physical movement.
+
+---
+
+## Session 18 — 2026-08-14 — Clearing the bench code out of the motors
+
+### Goal
+Take the temporary motor check out of the firmware before anything else is given
+the ability to drive.
+
+### What was done
+- The whole block went: the three constants, the two state variables, the burst
+  started at the end of `setup()` and the stop in the loop. Forty-nine lines out,
+  and the build shrank by 308 bytes.
+- `drive()` itself stays, as does the `drive(0, 0)` in `setup()`. Neither is bench
+  code: one is the interface to the motors, and the other exists because the
+  direction pins come up in an undefined state and a 4WD chassis with no caster
+  will drive itself off a table while the rest of `setup()` is still running.
+- The boot beep stays too, and its comment was rewritten to say why. It is no
+  longer marked temporary.
+- One practical consequence: the wheels no longer spin on power-up, so the
+  standing rule that the battery switch had to be off before every upload is void.
+
+### Problems & challenges
+None. The block came out cleanly and the only thing to watch for was leaving the
+two pieces behind that are not bench code.
+
+### Decisions & rationale
+- **Removed now rather than later, because of what comes next.** Once the browser
+  can move the rover there would be two places writing to the motors, and this one
+  wrote at every power-up, on its own initiative, at full duty. If the rover moved
+  when it should not, there would be no way to tell which of the two moved it.
+  Taking it out leaves exactly one writer, which is the only state in which the
+  next step can be debugged at all.
+- **Its job was finished.** The directions of all four motors were established
+  when it was written, and checked again after the chassis was reassembled. What
+  was left to watch for — whether all four reach speed together, whether the
+  driver heats — has been seen.
+- **The beep changed category rather than being deleted.** Session 15 listed both
+  temporary blocks as coming out during phase 4. Only one did. The buzzer's VCC is
+  unplugged by hand before every upload, because esptool holds the board in ROM
+  download mode where none of this firmware runs to silence the pin, and anything
+  unplugged by hand can be left unplugged. A silent AEB warning with nothing wrong
+  in the code is exactly the fault this project has already had once, in the
+  display. The beep is what says the wire went back, so it is a power-on self test
+  now and not scaffolding.
+
+### Next up
+Driving commands from the page, and a watchdog that stops the rover when they
+stop arriving.
+
+---
+
+## Session 19 — 2026-08-16 — Driving from the page, and a watchdog that does not trust silence
+
+### Goal
+Let the phone drive the rover, and make it stop itself when the commands stop
+arriving. The sensitive step of phase 4: from here a fault in the communication
+channel turns into physical movement.
+
+### What was done
+The work was split into three stages so that everything which stops the rover was
+built and tested before anything which could move it existed.
+
+- **Stage one — the stopping mechanism, against a rover that cannot move.** The
+  commanded values, a `safeDrive` seam, the watchdog, and the single place in the
+  loop where the motors are written. No endpoint and no controls on the page, so
+  none of it could be reached. Nothing changed in the rover's behaviour at all.
+- **Stage two — the whole channel, still with the motors out of reach.** Buttons
+  and a speed slider on the page, a sender in the browser, and `POST /drive` on
+  the rover to receive them. The handler validated, translated and reported, but
+  left the commanded values alone. It did refresh the watchdog, which made the
+  watchdog live and testable while the rover was still incapable of running away.
+- **Stage three — two assignments.** Copying the handler's locals into the
+  commanded pair. That is the entire change that makes this rover able to move.
+
+Verified on a stand: all four directions with the correct signs, releasing a
+button stops it, and holding forward while closing the browser tab leaves the
+wheels turning briefly before the rover stops itself. The percentage-to-duty
+conversion was checked against six different slider positions.
+
+The serial logging was reworked in the middle of this, for reasons below.
+
+### Problems & challenges
+
+**Fault 1 — nothing in the serial output could be read**
+
+- **Symptom:** with the driving commands added there were four repeating reports
+  running at once — the line sensors, the distance, the brake light and now the
+  commands — roughly twenty-four lines a second. Watching any one of them meant
+  watching all of them, and the watchdog message could not be picked out at all.
+- **Diagnosis:** the single `SERIAL_VERBOSE` flag was written in phase 2, when the
+  line sensors were the only thing being watched, and its comment still said so.
+  It stopped fitting the moment more than one subsystem was printing: at any
+  moment one of them is under test and the rest are noise, and a single boolean
+  cannot express which. The line sensors were not even behind it — they had been
+  left as the deliberate exception, from a purpose that had long since been
+  served.
+- **Solution:** one switch per repeating report — `LOG_BRAKE`, `LOG_BUTTON`,
+  `LOG_LINE`, `LOG_DISTANCE`, `LOG_DRIVE`. Events are not in the list and are
+  never silenced: a rejected command, the watchdog firing, a failed init, the
+  addresses printed at boot. Those are not reports that repeat, they are things
+  that happened.
+- **A side effect worth noticing:** the build shrank by 852 bytes. The strings
+  belonging to the silenced reports are unreachable, so the linker drops them.
+
+**Fault 2 — the rover only turns on the spot at full power**
+
+- **Symptom:** commanded to turn from a standstill, it does not move at any
+  setting below 100%. Forward and back work at much lower settings.
+- **Diagnosis:** expected, and written into the project notes before it was seen.
+  In a rolling turn the wheels roll; turning on the spot makes all four wheels
+  slide sideways across the surface, and lateral scrub takes far more torque than
+  rolling does. This chassis is 4WD with no caster, so there is no wheel that can
+  simply pivot. On top of that, breaking static friction from a standstill is the
+  hardest case there is — the same distinction that makes a starting threshold
+  higher than a running one.
+- **Not solved, and deliberately not.** The measurement was taken on a table, from
+  a standstill, with the board still tethered to a USB cable. The track is bristol
+  board and turns during real driving happen while already moving, which is the
+  easy case rather than the hard one. Changing the turning model on the strength of
+  a measurement taken under three wrong conditions would be the same mistake the
+  line sensor calibration already taught once.
+- **One variable still to rule out:** battery voltage. Six alkaline cells under
+  the load of four motors sag, and a tired pack produces exactly this symptom for
+  a completely different reason. Measuring the pack under load separates torque
+  shortage from lateral scrub, and until that is done both explanations are open.
+
+### Decisions & rationale
+- **Buttons are held, not latched.** Pressing and holding drives; letting go
+  stops. A rover that keeps driving while nobody is touching anything is the wrong
+  default for a project about safety systems, and holding also means the watchdog
+  is exercised constantly rather than being a mechanism that wakes once in its
+  life.
+- **The browser sends state, not events.** Every message says what the operator
+  wants *now* — not "do this once". A lost message costs nothing, because the next
+  one carries the same thing; duplicates and out-of-order arrivals are equally
+  harmless. An event-based channel would have neither property: "advance five
+  centimetres" twice is ten centimetres.
+- **Two independent ways to stop, and they are not the same mechanism.** Releasing
+  a button sends an explicit stop, which is the ordinary path and takes effect
+  immediately. The watchdog covers the case where explicit cannot arrive at all,
+  because the phone left the room or the browser closed. Neither one relies on the
+  other.
+- **The heartbeat is not what makes the controls responsive.** Pressing and
+  releasing each send at once. The repeating send exists only to keep proving the
+  channel is alive, which is why the ratio between it and the timeout is the only
+  thing about its rate that matters: three consecutive messages have to be lost
+  before the rover stops by mistake.
+- **`safeDrive` was built before it had any callers.** It only forwards to
+  `drive()` today. Adding the seam after the callers existed would mean finding
+  and converting every one of them, and a single missed call would be a silent way
+  around the brakes that no test would catch. Phase 5 puts the AEB inside it
+  without touching a line of the code that decides where to go.
+- **Request handlers record intent; the loop applies it.** A handler that wrote to
+  the motors would put the timing of a physical action in the hands of network
+  traffic. Keeping one writer, at a point in the loop of its own choosing, is also
+  what makes a single interception point possible for the AEB.
+- **Speed travels as a percentage rather than a raw duty.** The page then carries
+  no number derived from the PWM resolution, and its slider will not need editing
+  when the floor is measured. A slider whose left end reads 35 also does not look
+  like a stop, and one whose left end reads zero would.
+- **Out of range is rejected, not clamped.** `String::toInt()` answers zero for
+  `"abc"` exactly as it does for `"0"`, so clamping would quietly turn nonsense
+  into a crawl. The slider cannot produce a value outside its range, so one
+  arriving means something is wrong — and something wrong should not move a
+  vehicle.
+- **A stop is answered before the speed is even read.** Refusing a stop because
+  some unrelated field was malformed would leave the rover driving on a validation
+  error, which is the one outcome the whole handler exists to prevent.
+- **Only a command that was understood refreshes the watchdog.** A rejected request
+  proves that something is sending, not that an operator is there. A stream of
+  nonsense must not keep the deadline satisfied while the rover carries on with
+  the last order it did understand.
+- **Stopping means coasting, for now.** `drive(0, 0)` drops the duty to zero and
+  the driver goes inactive, so the rover rolls to a halt rather than braking. The
+  hardware can brake — driving both direction pins of a side to the same level
+  shorts the motor — but nothing generates that combination yet. The AEB will want
+  a stop that actually stops, and that belongs with the phase where it matters.
+
+### Next up
+Measurement, and it is blocked on hardware: the ESP32 is still tethered to a USB
+cable, so the rover cannot leave the desk. Three numbers are waiting on a portable
+supply — the starting threshold under real load, ground speed, and the setting at
+which a turn works while already moving. `DRIVE_MIN_PERCENT` stays a declared
+guess until then, because a threshold measured with the wheels in the air would
+describe nothing.

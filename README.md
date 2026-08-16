@@ -3,12 +3,13 @@
 A small autonomous rover that demonstrates two active automotive safety systems —
 **Autonomous Emergency Braking (AEB)** and **Lane Keeping Assist (LKA)** — on an ESP32.
 
-> 🚧 **Status:** In active development. **The rover is fully wired, and every component
-> has been seen working on it** — four motors under PWM on a split supply, both line
-> sensors and the ultrasonic sensor calibrated at their mounted height, the OLED drawing
-> its test screen, and the brake lights, status LED, mode button and buzzer all verified
-> in place. The pin map is full. Next is Wi-Fi control from the phone.
-> See the [roadmap](#roadmap).
+> 🚧 **Status:** In active development. **The rover drives from a phone.** It serves its
+> own Wi-Fi network and a dashboard that shows the sensor readings live and steers the
+> vehicle, and it stops itself when the commands stop arriving. Before that: fully wired,
+> with four motors under PWM on a split supply, both line sensors and the ultrasonic
+> sensor calibrated at their mounted height, and the OLED, brake lights, status LED,
+> mode button and buzzer all verified in place. Next is AEB — the first of the two
+> safety systems. See the [roadmap](#roadmap).
 
 SafeRover runs two independent closed control loops (sense → decide → act) on top of a
 real-time state machine.
@@ -45,6 +46,31 @@ Around the two safety systems: an on-board **OLED** status display, a **phone da
 with live telemetry and a brake-event log, a physical **mode button**, and every braking
 event pushed to the **cloud** (Adafruit IO) with an **NTP** timestamp — building a
 remotely-viewable history.
+
+### 📱 Phone control — and a watchdog that does not trust silence
+
+The rover creates **its own Wi-Fi network** rather than joining one, so a demonstration
+never depends on infrastructure nobody in the room controls. A phone joins it and opens a
+page served by the ESP32 itself: the sensor readings update live, and a cross of held
+buttons plus a speed slider drive the vehicle.
+
+**Only one device may connect at a time.** Two operators sending driving commands at once
+is an unsafe state — one brakes while the other accelerates — and refusing the second
+association keeps that out of the command code entirely.
+
+The browser does not send *events*, it **repeats the current intent** several times a
+second. A lost message costs nothing, because the next one carries the same thing. And the
+rover measures the gap between them:
+
+> **If no command arrives for half a second, the rover stops itself.**
+
+That matters because nothing in the system decays on its own. The commanded values hold
+whatever arrived last, and the PWM peripheral keeps producing that waveform with no help
+from the CPU — so a rover whose operator walked out of range would drive until its battery
+ran out. **Silence on a control channel is not consent to keep going.**
+
+Letting go of a button is the ordinary way to stop and takes effect immediately. The
+watchdog exists for the case where "stop" cannot be sent at all.
 
 ---
 
@@ -137,6 +163,12 @@ The firmware is split into modules, each built and tested in isolation:
 **Design rule:** all driving goes through the safety layer — navigation and manual control
 call `safeDrive(...)`, never the motors directly, so AEB is impossible to bypass.
 
+`safeDrive()` is already in place and today only forwards to `drive()`. It was built
+before it had any callers on purpose: adding the seam afterwards would mean finding and
+converting every one of them, and a single missed call would be a silent way around the
+brakes that no test would catch. When phase 5 puts the AEB stages inside it, not a line of
+the code that decides *where to go* has to change.
+
 ---
 
 ## Tech stack
@@ -194,7 +226,7 @@ pio run -e i2c-scanner -t upload
 | 1 | GPIO basics — Serial, button, LED, PWM | ✅ |
 | 2 | Sensors on the bench — OLED, ultrasonic, line sensors | ✅ |
 | 3 | Vehicle moves — chassis, power, straight-line trim | ✅ |
-| 4 | Phone control — Wi-Fi dashboard + watchdog stop | ⬜ |
+| 4 | Phone control — Wi-Fi dashboard + watchdog stop | ✅ |
 | 5 | AEB — 3-stage braking + hysteresis | ⬜ |
 | 6 | LKA — track + P-controller tuning | ⬜ |
 | 7 | Brain — state machine + non-blocking loop | ⬜ |
