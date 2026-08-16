@@ -259,14 +259,26 @@ constexpr unsigned long BUTTON_DEBOUNCE_MS = 50;
 // --- Serial ---
 constexpr unsigned long SERIAL_BAUD = 115200;
 
-// TEMPORARY — set back to true when the line sensors have been read.
-// Silences every repeating line except the line sensors, so their readings can
-// be watched without four other tasks scrolling them off the screen. Only the
-// printing is suppressed: the brake light, the button, the motor sequence and
-// the distance measurement all still run exactly as before, so the loop timing
-// stays representative. One-off messages at boot are left alone — they fire
-// once and they are how you know the board actually restarted.
-constexpr bool SERIAL_VERBOSE = true;
+// One switch per repeating report, rather than a single verbose flag.
+//
+// The single flag was written when the line sensors were the only thing being
+// watched, and it stopped fitting as soon as more than one subsystem was
+// printing. At any moment one of them is under test and the rest are noise, and
+// a single boolean cannot say which one. With the driving commands added there
+// are four repeating reports running at once - roughly twenty-four lines a
+// second - and reading any one of them meant reading all of them.
+//
+// Only the printing is suppressed. Every task still runs at its own rate, so
+// the loop timing stays representative of the real thing.
+//
+// Events are deliberately absent from this list and are never silenced: a
+// rejected command, the watchdog firing, a failed init, the addresses reported
+// at boot. Those are not reports that repeat, they are things that happened.
+constexpr bool LOG_BRAKE = false;
+constexpr bool LOG_BUTTON = false;
+constexpr bool LOG_LINE = false;
+constexpr bool LOG_DISTANCE = false;
+constexpr bool LOG_DRIVE = true;
 
 // --- Wi-Fi access point ---
 // The rover creates its own network instead of joining an existing one. A
@@ -348,6 +360,44 @@ WebServer server(WEB_SERVER_PORT);
 // generous for a small track.
 constexpr unsigned long COMMAND_TIMEOUT_MS = 500;
 
+// How often the page repeats the current command while a button is held.
+//
+// This is not what makes the controls feel responsive. Pressing and releasing
+// each send immediately, so the rover reacts on the edge of the gesture rather
+// than waiting for the next tick. The only job of this rate is to keep proving
+// the channel is alive, which is why its ratio to the timeout above is the only
+// thing about it that matters: three of these have to go missing in a row
+// before the rover stops by mistake.
+constexpr unsigned long COMMAND_SEND_INTERVAL_MS = 120;
+
+// The slowest setting worth offering, as a percentage of full power. Below some
+// threshold the motors do not turn at all - the torque never overcomes static
+// friction and the gearbox, so they sit drawing current and whining. That
+// threshold belongs to these motors and this chassis; it is physical rather
+// than a preference.
+//
+// A percentage rather than a raw duty, so that the page carries no number
+// derived from the PWM resolution. dutyFromPercent converts, here in the
+// firmware, which is the only side allowed to know how the motors are driven.
+// It also reads more honestly: a slider whose left end is 35 does not look like
+// a stop, and one whose left end is zero would.
+//
+// The value is a guess and has not been measured. Measuring it is a step of its
+// own: lower the slider until the wheels stop turning, then come back up.
+//
+// Checked on both sides. The slider will not go below it, and the firmware
+// refuses anything below it that arrives anyway. Neither trusts the other.
+//
+// It is not a way to stop. At the minimum the rover crawls, it does not halt.
+// Releasing the button stops it, and the watchdog stops it when nothing
+// releases anything.
+constexpr uint8_t DRIVE_MIN_PERCENT = 35;
+
+// Where the slider sits when the page loads. Deliberately near the bottom: the
+// first runs on a floor happen indoors, and a rover that starts at full power
+// finds a wall.
+constexpr uint8_t DRIVE_START_PERCENT = 47;
+
 // Brightness steps the brake light cycles through, as percentages.
 constexpr uint8_t BRAKE_DUTY_PERCENTS[] = {25, 50, 75, 100};
 constexpr size_t BRAKE_DUTY_STEPS =
@@ -388,15 +438,15 @@ unsigned long echoDurationValue = 0;
 // direction, magnitude is duty.
 //
 // Held here rather than acted on where they arrive. A request handler must not
-// be the thing that writes to motors; the loop is, once per pass, at a moment of
-// its own choosing. That leaves a single writer at a known point - which is also
-// where the AEB will intercept in phase 5, without touching any of the code that
-// decides where to go.
+// be the thing that writes to motors; the loop is, once per pass, at a moment
+// of its own choosing. That leaves a single writer at a known point - which is
+// also where the AEB will intercept in phase 5, without touching any of the
+// code that decides where to go.
 //
 // commandTimedOut starts true, meaning no command has ever arrived rather than
-// one arrived just now. The rover is quiet after a reset by decision rather than
-// by these values happening to be zero, and while the flag is true it does not
-// matter what millis() read at startup.
+// one arrived just now. The rover is quiet after a reset by decision rather
+// than by these values happening to be zero, and while the flag is true it does
+// not matter what millis() read at startup.
 int16_t commandedLeft = 0;
 int16_t commandedRight = 0;
 unsigned long lastCommandMs = 0;
@@ -411,7 +461,7 @@ static void applyBrakeDuty(size_t index) {
   const uint8_t percent = BRAKE_DUTY_PERCENTS[index];
   ledcWrite(PIN_BRAKE_LIGHT, dutyFromPercent(percent));
 
-  if (SERIAL_VERBOSE) {
+  if (LOG_BRAKE) {
     Serial.print("BRAKE LIGHT DUTY ");
     Serial.print(percent);
     Serial.println("%");
@@ -447,27 +497,26 @@ static void drive(int16_t left, int16_t right) {
   ledcWrite(PIN_MOTOR_ENB, min(rightDuty, PWM_MAX_DUTY));
 }
 
-// The one door to the motors, and the only thing any driving decision is allowed
-// to call. Today it just forwards, and that is the whole intent: this is a seam,
-// not an abstraction.
+// The one door to the motors, and the only thing any driving decision is
+// allowed to call. Today it just forwards, and that is the whole intent: this
+// is a seam, not an abstraction.
 //
 // Phase 5 puts the AEB stages here - WARN, SLOW, STOP with hysteresis. Because
 // manual control and, later, the lane keeping already come through here rather
 // than through drive(), that layer arrives without a single line of the code
 // that decides where to go being touched. Adding the seam later would mean
-// finding and converting every caller, and one missed call would be a silent way
-// around the brakes that no test would catch. A safety layer navigation code can
-// route around is not a safety layer.
+// finding and converting every caller, and one missed call would be a silent
+// way around the brakes that no test would catch. A safety layer navigation
+// code can route around is not a safety layer.
 //
 // The one exception is drive(0, 0) in setup(). That is hardware initialisation
-// rather than a driving decision - the direction pins come up undefined - and at
-// that moment there is no distance reading for an AEB to reason about anyway.
+// rather than a driving decision - the direction pins come up undefined - and
+// at that moment there is no distance reading for an AEB to reason about
+// anyway.
 //
 // Do not delete this for doing nothing. Doing nothing is its correct behaviour
 // for now.
-static void safeDrive(int16_t left, int16_t right) {
-  drive(left, right);
-}
+static void safeDrive(int16_t left, int16_t right) { drive(left, right); }
 
 // One reader for both sensors — they are the same part on the same ADC, so the
 // pin is the only thing that differs.
@@ -617,7 +666,7 @@ static void startAccessPoint() {
       WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASSWORD, WIFI_AP_CHANNEL,
                   WIFI_AP_HIDDEN, WIFI_AP_MAX_CLIENTS);
 
-  // Deliberately not behind SERIAL_VERBOSE. These print once at boot, and the
+  // Deliberately behind no log switch. These print once at boot, and the
   // address is the only way to know what to point a browser at.
   if (!started) {
     // Reported and then let go, the same as the display above: a rover that
@@ -639,7 +688,14 @@ static void startAccessPoint() {
 // load, not once per reading.
 static void handleRoot() {
   String page = PAGE_HTML;
+
+  // Every number the page needs comes from a constant here, so none of them is
+  // written down twice. The slider's floor in particular will change once it has
+  // been measured, and the page has to follow without being edited.
   page.replace("%POLL_MS%", String(WEB_POLL_INTERVAL_MS));
+  page.replace("%SEND_MS%", String(COMMAND_SEND_INTERVAL_MS));
+  page.replace("%MIN_PERCENT%", String(DRIVE_MIN_PERCENT));
+  page.replace("%START_PERCENT%", String(DRIVE_START_PERCENT));
 
   server.send(200, "text/html", page);
 }
@@ -674,6 +730,111 @@ static void handleData() {
   server.send(200, "application/json", json);
 }
 
+// Turns one command from the page into the two side values the motors take, and
+// reports what it made of it. It does not drive: nothing here writes to the
+// commanded values yet, so the channel can be proven end to end while the
+// motors are still out of its reach.
+//
+// Everything is checked rather than trusted. The page cannot produce a speed
+// outside the slider's range, so one arriving means something is wrong - a bug,
+// a stale cached page, or a request made without the page at all, which anyone
+// on this network can do. A request that is not fully understood is not a
+// command, and it must not move a vehicle.
+//
+// Out of range is rejected rather than clamped. Clamping takes two rules where
+// rejecting takes one, and it hides the case that matters: String::toInt()
+// answers zero for "abc" exactly as it does for "0", so clamping would quietly
+// turn nonsense into a crawl.
+static void handleDrive() {
+  const String dir = server.arg("dir");
+
+  int16_t left = 0;
+  int16_t right = 0;
+
+  // Stop is answered first and without reading the speed at all. Stopping is
+  // safe under every circumstance, and refusing one because some other field
+  // was malformed would leave the rover driving on a validation error - the
+  // exact outcome this handler exists to prevent.
+  if (dir != "stop") {
+    const String speedArg = server.arg("speed");
+    const long percent = speedArg.toInt();
+
+    // A missing argument needs no test of its own: server.arg() answers with an
+    // empty string, toInt() reads that as zero, and zero is below the minimum.
+    // The upper bound is written as itself because 100 is the top of a
+    // percentage rather than a limit anyone could tune.
+    //
+    // Read into a long and range-checked before it is narrowed. Narrowing first
+    // could fold an absurd value back inside the valid range and let it
+    // through.
+    if (percent < DRIVE_MIN_PERCENT || percent > 100) {
+      Serial.print("DRIVE  rejected, speed=");
+      Serial.println(speedArg);
+
+      server.send(400, "text/plain", "bad speed");
+      return;
+    }
+
+    // Casts rather than braces, the opposite of the constants above: this value
+    // is not known at compile time, so braces could not check it. The range
+    // test that just ran is the check.
+    const uint8_t percentValue = static_cast<uint8_t>(percent);
+    const int16_t magnitude =
+        static_cast<int16_t>(dutyFromPercent(percentValue));
+
+    // The one place in this project that knows what "left" means. Below it
+    // there are two numbers and nothing else. There is no servo - a turn is a
+    // difference between the two sides - and these turn on the spot, one side
+    // driving forward against the other backward.
+    if (dir == "fwd") {
+      left = magnitude;
+      right = magnitude;
+    } else if (dir == "back") {
+      left = -magnitude;
+      right = -magnitude;
+    } else if (dir == "left") {
+      left = -magnitude;
+      right = magnitude;
+    } else if (dir == "right") {
+      left = magnitude;
+      right = -magnitude;
+    } else {
+      Serial.print("DRIVE  rejected, dir=");
+      Serial.println(dir);
+
+      server.send(400, "text/plain", "bad dir");
+      return;
+    }
+  }
+
+  // The command was understood, so the channel is alive and the deadline moves.
+  // Only a command that got this far does this: a rejected request proves that
+  // something is sending, not that an operator is there, and a stream of
+  // nonsense must not keep the watchdog satisfied while the rover carries on
+  // with the last order it did understand.
+  //
+  // Note what is not set here. The commanded values stay untouched, so nothing
+  // can move yet, while the watchdog above is now live and can be watched doing
+  // its job against a rover that is incapable of running away.
+  lastCommandMs = millis();
+  commandTimedOut = false;
+
+  // Behind a switch because a held button produces about eight of these a
+  // second, which is a repeating report. The two rejections above are not:
+  // those are events, and they print whatever the switches say, like the
+  // watchdog.
+  if (LOG_DRIVE) {
+    Serial.print("DRIVE  dir=");
+    Serial.print(dir);
+    Serial.print("  L=");
+    Serial.print(left);
+    Serial.print("  R=");
+    Serial.println(right);
+  }
+
+  server.send(200, "text/plain", "ok");
+}
+
 // Registers the two routes and opens the socket on port 80. Placed after the
 // handlers because it names them, and a function has to be declared before it
 // can be referred to.
@@ -692,6 +853,7 @@ static void handleData() {
 static void startWebServer() {
   server.on("/", HTTP_GET, handleRoot);
   server.on("/data", HTTP_GET, handleData);
+  server.on("/drive", HTTP_POST, handleDrive);
   server.begin();
 
   Serial.print("WEB SERVER up  http://");
@@ -814,11 +976,11 @@ void setup() {
   // delay() is allowed here. The rule against it applies to the main loop,
   // where blocking means the sensors stop being read; setup() runs once before
   // that loop starts and holds nothing up.
-  if (SERIAL_VERBOSE) {
-    Serial.print("BUZZER TEST  ");
-    Serial.print(BUZZER_TEST_MS);
-    Serial.println(" ms beep on GPIO 4");
-  }
+  // Ungated, like the other lines printed at boot: it fires once and it is what
+  // explains the noise that follows it.
+  Serial.print("BUZZER TEST  ");
+  Serial.print(BUZZER_TEST_MS);
+  Serial.println(" ms beep on GPIO 4");
 
   digitalWrite(PIN_BUZZER, BUZZER_SOUND);
   delay(BUZZER_TEST_MS);
@@ -846,7 +1008,7 @@ void loop() {
     lastButtonChange = now;
     lastButtonPressed = buttonPressed;
 
-    if (SERIAL_VERBOSE) {
+    if (LOG_BUTTON) {
       Serial.println(buttonPressed ? "BUTTON PRESSED" : "BUTTON RELEASED");
     }
   }
@@ -865,12 +1027,14 @@ void loop() {
     const int16_t delta = static_cast<int16_t>(lineLeftValue) -
                           static_cast<int16_t>(lineRightValue);
 
-    Serial.print("LINE  L=");
-    Serial.print(lineLeftValue);
-    Serial.print("  R=");
-    Serial.print(lineRightValue);
-    Serial.print("  delta=");
-    Serial.println(delta);
+    if (LOG_LINE) {
+      Serial.print("LINE  L=");
+      Serial.print(lineLeftValue);
+      Serial.print("  R=");
+      Serial.print(lineRightValue);
+      Serial.print("  delta=");
+      Serial.println(delta);
+    }
   }
 
   // Median-filtered now that the raw noise has been characterised on the bench:
@@ -885,7 +1049,7 @@ void loop() {
     // the sensor or from the conversion below it.
     echoDurationValue = readEchoMedian();
 
-    if (SERIAL_VERBOSE) {
+    if (LOG_DISTANCE) {
       Serial.print("DIST  echo=");
       Serial.print(echoDurationValue);
       Serial.print("us  ");
@@ -905,12 +1069,12 @@ void loop() {
 
   // The watchdog, and the single place the motors are written.
   //
-  // Silence is read as a stop. The flag guards the condition rather than letting
-  // it fire on every pass once the deadline is past: after the values are zeroed
-  // there is nothing left to zero, and the message belongs to the moment the
-  // link went quiet rather than to every pass afterwards. Not behind
-  // SERIAL_VERBOSE either, because that switch silences repeating reports and
-  // this is an event - if it happened, it is exactly what you need to see.
+  // Silence is read as a stop. The flag guards the condition rather than
+  // letting it fire on every pass once the deadline is past: after the values
+  // are zeroed there is nothing left to zero, and the message belongs to the
+  // moment the link went quiet rather than to every pass afterwards. Behind no
+  // log switch either, because those silence repeating reports and this is an
+  // event - if it happened, it is exactly what you need to see.
   //
   // safeDrive runs every pass rather than on a timer. Writing the same duty
   // again is a few register writes that change nothing, while a timer would put
@@ -929,26 +1093,27 @@ void loop() {
   safeDrive(commandedLeft, commandedRight);
 
   // Answers whatever the browser has asked for, and it is the only moment the
-  // server does anything at all. It has no task and no timer of its own; it sits
-  // still until this line gives it a turn. That is why a synchronous server was
-  // chosen over an asynchronous one - the scheduler stays in charge, and no
-  // request handler can interrupt a distance measurement. From phase 5 that is
-  // not a detail, it is what makes the braking timing something that can be
-  // reasoned about at all.
+  // server does anything at all. It has no task and no timer of its own; it
+  // sits still until this line gives it a turn. That is why a synchronous
+  // server was chosen over an asynchronous one - the scheduler stays in charge,
+  // and no request handler can interrupt a distance measurement. From phase 5
+  // that is not a detail, it is what makes the braking timing something that
+  // can be reasoned about at all.
   //
   // Last in the loop on purpose, so it serves the values this pass just took
   // rather than the previous pass's.
   //
-  // One thing this is NOT free of: with no request waiting, handleClient() calls
-  // delay(1) before returning. The library assumes a loop that does nothing else
-  // and needs somewhere to yield to FreeRTOS - and on a dual-core ESP32 the
-  // Arduino loop task never yields on its own, so that assumption is not
-  // unreasonable. server.enableDelay(false) removes it, and it is left on
+  // One thing this is NOT free of: with no request waiting, handleClient()
+  // calls delay(1) before returning. The library assumes a loop that does
+  // nothing else and needs somewhere to yield to FreeRTOS - and on a dual-core
+  // ESP32 the Arduino loop task never yields on its own, so that assumption is
+  // not unreasonable. server.enableDelay(false) removes it, and it is left on
   // deliberately. Switching it off makes yielding this loop's job, and the only
-  // yield left would be the delay inside readEchoMedian, which is there to space
-  // ultrasonic bursts rather than to feed the scheduler and which disappears the
-  // day that measurement is made non-blocking. Turning it off belongs in the
-  // same change as an explicit yield of our own, not in this one.
+  // yield left would be the delay inside readEchoMedian, which is there to
+  // space ultrasonic bursts rather than to feed the scheduler and which
+  // disappears the day that measurement is made non-blocking. Turning it off
+  // belongs in the same change as an explicit yield of our own, not in this
+  // one.
   //
   // It also adds work to the loop. Nothing beside pulseIn today, which blocks
   // for up to 25 ms, but by phase 7 it stacks with that and with the sixteen
