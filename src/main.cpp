@@ -326,6 +326,28 @@ constexpr unsigned long WEB_HANDLE_INTERVAL_MS = 20;
 // calls handleClient(), so nothing about it runs behind the scheduler's back.
 WebServer server(WEB_SERVER_PORT);
 
+// --- Driving commands ---
+// How long the rover accepts silence before stopping itself.
+//
+// Nothing in this system decays on its own. The commanded values below hold
+// whatever arrived last, and LEDC is a peripheral: written once, it keeps
+// producing that waveform with no further work from the CPU. So there is
+// nothing anywhere - not in software, not in hardware - that would return the
+// motors to zero on its own. A rover whose operator vanished would drive until
+// the battery ran out, because the last command was never withdrawn. Silence on
+// a control channel is not consent to keep going.
+//
+// The value is a balance. Too short and an ordinary network hiccup stops the
+// rover mid-drive; too long and it keeps driving after the phone is gone. The
+// page sends several times faster than this, so three consecutive messages have
+// to be lost before it stops by mistake.
+//
+// What half a second is in centimetres is not known. Ground speed has never
+// been measured - the only full-power run was made with the wheels lifted - and
+// that measurement is what will say whether this number is right or too
+// generous for a small track.
+constexpr unsigned long COMMAND_TIMEOUT_MS = 500;
+
 // Brightness steps the brake light cycles through, as percentages.
 constexpr uint8_t BRAKE_DUTY_PERCENTS[] = {25, 50, 75, 100};
 constexpr size_t BRAKE_DUTY_STEPS =
@@ -361,6 +383,24 @@ unsigned long lastWebHandle = 0;
 uint16_t lineLeftValue = 0;
 uint16_t lineRightValue = 0;
 unsigned long echoDurationValue = 0;
+
+// What the operator has asked for, in the form drive() already takes: sign is
+// direction, magnitude is duty.
+//
+// Held here rather than acted on where they arrive. A request handler must not
+// be the thing that writes to motors; the loop is, once per pass, at a moment of
+// its own choosing. That leaves a single writer at a known point - which is also
+// where the AEB will intercept in phase 5, without touching any of the code that
+// decides where to go.
+//
+// commandTimedOut starts true, meaning no command has ever arrived rather than
+// one arrived just now. The rover is quiet after a reset by decision rather than
+// by these values happening to be zero, and while the flag is true it does not
+// matter what millis() read at startup.
+int16_t commandedLeft = 0;
+int16_t commandedRight = 0;
+unsigned long lastCommandMs = 0;
+bool commandTimedOut = true;
 
 // Percentages are the readable unit; the hardware wants raw counts.
 static uint32_t dutyFromPercent(uint8_t percent) {
@@ -405,6 +445,28 @@ static void drive(int16_t left, int16_t right) {
 
   ledcWrite(PIN_MOTOR_ENA, min(leftDuty, PWM_MAX_DUTY));
   ledcWrite(PIN_MOTOR_ENB, min(rightDuty, PWM_MAX_DUTY));
+}
+
+// The one door to the motors, and the only thing any driving decision is allowed
+// to call. Today it just forwards, and that is the whole intent: this is a seam,
+// not an abstraction.
+//
+// Phase 5 puts the AEB stages here - WARN, SLOW, STOP with hysteresis. Because
+// manual control and, later, the lane keeping already come through here rather
+// than through drive(), that layer arrives without a single line of the code
+// that decides where to go being touched. Adding the seam later would mean
+// finding and converting every caller, and one missed call would be a silent way
+// around the brakes that no test would catch. A safety layer navigation code can
+// route around is not a safety layer.
+//
+// The one exception is drive(0, 0) in setup(). That is hardware initialisation
+// rather than a driving decision - the direction pins come up undefined - and at
+// that moment there is no distance reading for an AEB to reason about anyway.
+//
+// Do not delete this for doing nothing. Doing nothing is its correct behaviour
+// for now.
+static void safeDrive(int16_t left, int16_t right) {
+  drive(left, right);
 }
 
 // One reader for both sensors — they are the same part on the same ADC, so the
@@ -840,6 +902,31 @@ void loop() {
       }
     }
   }
+
+  // The watchdog, and the single place the motors are written.
+  //
+  // Silence is read as a stop. The flag guards the condition rather than letting
+  // it fire on every pass once the deadline is past: after the values are zeroed
+  // there is nothing left to zero, and the message belongs to the moment the
+  // link went quiet rather than to every pass afterwards. Not behind
+  // SERIAL_VERBOSE either, because that switch silences repeating reports and
+  // this is an event - if it happened, it is exactly what you need to see.
+  //
+  // safeDrive runs every pass rather than on a timer. Writing the same duty
+  // again is a few register writes that change nothing, while a timer would put
+  // a delay between the moment something decides to stop and the moment the
+  // motors are told. Placed after the distance read for the same reason: from
+  // phase 5 the layer inside safeDrive wants the freshest measurement this pass
+  // produced, not the previous one.
+  if (!commandTimedOut && now - lastCommandMs >= COMMAND_TIMEOUT_MS) {
+    commandedLeft = 0;
+    commandedRight = 0;
+    commandTimedOut = true;
+
+    Serial.println("WATCHDOG  no command within timeout, motors stopped");
+  }
+
+  safeDrive(commandedLeft, commandedRight);
 
   // Answers whatever the browser has asked for, and it is the only moment the
   // server does anything at all. It has no task and no timer of its own; it sits
