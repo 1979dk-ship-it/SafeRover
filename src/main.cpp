@@ -807,15 +807,26 @@ static void handleDrive() {
     }
   }
 
-  // The command was understood, so the channel is alive and the deadline moves.
-  // Only a command that got this far does this: a rejected request proves that
-  // something is sending, not that an operator is there, and a stream of
-  // nonsense must not keep the watchdog satisfied while the rover carries on
-  // with the last order it did understand.
+  // The command was understood: here is the new intent, and it is fresh as of
+  // now. Both halves belong together, which is why they are written as one
+  // block - an intent without a deadline would never expire.
   //
-  // Note what is not set here. The commanded values stay untouched, so nothing
-  // can move yet, while the watchdog above is now live and can be watched doing
-  // its job against a rover that is incapable of running away.
+  // Only a command that got this far reaches these lines. A rejected request
+  // proves that something is sending, not that an operator is there, and a
+  // stream of nonsense must not keep the watchdog satisfied while the rover
+  // carries on with the last order it did understand.
+  //
+  // These two assignments are the only reason this rover can move. Everything
+  // else in this file writes zero to the motors or reads a sensor. left and
+  // right are locals that would be gone the moment this function returned; the
+  // copy is what makes the value outlive the request and reach the loop.
+  //
+  // Note what still does not happen here: nothing touches a motor. The loop
+  // remains the only writer to the hardware, at a point of its own choosing,
+  // which is where the AEB will intercept in phase 5.
+  commandedLeft = left;
+  commandedRight = right;
+
   lastCommandMs = millis();
   commandTimedOut = false;
 
