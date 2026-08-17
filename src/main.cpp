@@ -953,18 +953,16 @@ void setup() {
   // by coincidence.
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
 
-  // begin() returns false when the panel does not answer. Checking it turns a
-  // silent dead screen into a named fault — an unchecked init failure and a
-  // display that simply never lit look identical from the outside, and that is
-  // one unknown too many. A failure here is reported and then let go: the rover
-  // keeps running without its screen rather than stopping dead.
+  // begin() never asks the panel anything. It ignores every I2C ACK, and its
+  // only failure path is the buffer allocation, so false means out of RAM and
+  // not a missing display: an unplugged panel still returns true. Checked
+  // anyway, because drawPixel indexes the buffer with no null check, so
+  // drawing after a failed allocation writes through a null pointer.
+  // Reported and then let go: the rover runs on without its screen.
   if (display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDRESS, true, false)) {
     showTestScreen();
   } else {
-    Serial.print("OLED init FAILED at 0x");
-    Serial.println(OLED_ADDRESS, HEX);
-    Serial.println("bus answered during the scan, so suspect the controller "
-                   "chip - try Adafruit_SH110X");
+    Serial.println("OLED buffer allocation FAILED - out of RAM");
   }
 
   startAccessPoint();
