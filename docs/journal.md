@@ -1860,3 +1860,96 @@ supply — the starting threshold under real load, ground speed, and the setting
 which a turn works while already moving. `DRIVE_MIN_PERCENT` stays a declared
 guess until then, because a threshold measured with the wheels in the air would
 describe nothing.
+
+---
+
+## Session 20 — 2026-08-19 — Off the cable, and the first ground speed figures
+
+### Goal
+Fit the WEMOS 18650 shield and its cell, move the ESP32 onto its own supply, and
+then take the measurements that had been waiting on exactly that: the setting at
+which the rover starts to move, its ground speed, and what half a second of
+watchdog is in centimetres.
+
+### What was done
+
+The shield and the 18650 cell arrived and were assembled. The cell was fitted,
+the shield checked, and the ESP32 moved off the USB cable onto it. The rover then
+drove across the floor untethered for the first time.
+
+That is what unblocked everything else in this entry. A trailing USB cable does
+not merely restrict where the rover can go — it pulls it sideways, and the pull
+changes as the cable drags and catches. Every speed figure taken that way would
+have included an unknown external force, and every deviation figure would have
+been measuring the cable rather than the vehicle. The measurements below were
+impossible in principle until the cable came off, not merely inconvenient.
+
+**Ground speed**, timed over a marked two-metre run at three settings:
+
+| duty | time over 2 m | speed | speed |
+|-----:|--------------:|------:|------:|
+| 62%  | 6.10 s | 32.8 cm/s | 1.18 km/h |
+| 75%  | 3.95 s | 50.6 cm/s | 1.82 km/h |
+| 100% | 2.37 s | 84.4 cm/s | 3.04 km/h |
+
+**The lowest setting at which the rover moves at all is 62%.** Below that the
+motors are energised and the vehicle stays put.
+
+One limitation of the method is worth recording rather than discovering later:
+each figure is two metres divided by the total elapsed time, so it is an average
+that includes the acceleration from a standstill. The steady-state speed is
+therefore somewhat higher than the number in the table, and every distance
+derived from these figures is a slight underestimate. That direction is the safe
+one for braking work — it understates how far the rover travels — but it means
+these are not top speeds.
+
+**An observation that is not a measurement:** driving straight across the floor,
+no drift to either side was visible. This was watched by eye over a short
+distance, and it does not close the trim item left open in session 11. It says
+only that the difference between the two sides is too small to see under these
+conditions. Session 11 set out how it will actually be measured — a straight run
+over a known distance with the deviation measured — and that stands.
+
+### Problems & challenges
+
+None. Nothing failed in this session, and nothing had to be diagnosed. The two
+findings below are results of the measurements, not faults.
+
+### Decisions & rationale
+
+- **`DRIVE_MIN_PERCENT` is wrong by nearly a factor of two, and the code already
+  said so.** The constant stands at 35 and its comment states plainly that the
+  value is a guess and has not been measured. The measurement gives 62. The whole
+  range from 35 to 61 is a dead band in which the rover draws current and does
+  not move — which is the exact condition the constant exists to keep out of. The
+  guess being honest about itself is what made this a measurement to take rather
+  than a bug to find.
+
+- **The response is not linear, and that is the more important of the two
+  findings.** Going from 62% to 100% is a factor of 1.6 in duty but a factor of
+  2.6 in speed. The plausible explanation is static friction: near the bottom of
+  the range much of the available torque is spent overcoming it, and only the
+  surplus becomes motion, so early increases in duty buy less speed than later
+  ones. This is recorded as the plausible explanation and not as an isolated
+  cause — nothing in this session separated it from the alternatives.
+
+- **The consequence belongs to phase 6, and belongs on its risk list.** A
+  proportional controller assumes that a proportional correction produces a
+  proportional response. That assumption does not hold here. The same change in
+  duty moves the rover more at high speed than at low, so a `Kp` tuned at one
+  speed will not necessarily suit another. This does not change the plan to use a
+  P controller; it says the tuning has to be done at, or checked against, the
+  speed the rover will actually run at.
+
+- **Braking distances are no longer blocked.** They were waiting on ground speed
+  and nothing else, and two figures follow directly:
+  - At full speed the rover covers about **8.4 cm between two distance
+    measurements**, which run every 100 ms. A `STOP` threshold chosen without
+    accounting for that gap will find the obstacle a step too late.
+  - Half a second of watchdog is about **42 cm at full speed** and about **16 cm
+    at the minimum**. The comment on `COMMAND_TIMEOUT_MS` states that this figure
+    in centimetres is not known; it is known now, and the comment can be brought
+    up to date.
+
+### Next up
+Update `DRIVE_MIN_PERCENT` to the measured value, and then plan phase 5.
