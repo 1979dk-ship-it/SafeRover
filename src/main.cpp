@@ -354,10 +354,10 @@ WebServer server(WEB_SERVER_PORT);
 // page sends several times faster than this, so three consecutive messages have
 // to be lost before it stops by mistake.
 //
-// What half a second is in centimetres is not known. Ground speed has never
-// been measured - the only full-power run was made with the wheels lifted - and
-// that measurement is what will say whether this number is right or too
-// generous for a small track.
+// In centimetres, now that ground speed has been measured on the floor: half a
+// second is about 42 cm at full power and about 16 cm at the minimum. Whether
+// 42 cm is acceptable on a small track is a separate decision that has not been
+// taken, so the value is left as it was.
 constexpr unsigned long COMMAND_TIMEOUT_MS = 500;
 
 // How often the page repeats the current command while a button is held.
@@ -379,11 +379,14 @@ constexpr unsigned long COMMAND_SEND_INTERVAL_MS = 120;
 // A percentage rather than a raw duty, so that the page carries no number
 // derived from the PWM resolution. dutyFromPercent converts, here in the
 // firmware, which is the only side allowed to know how the motors are driven.
-// It also reads more honestly: a slider whose left end is 35 does not look like
+// It also reads more honestly: a slider whose left end is 62 does not look like
 // a stop, and one whose left end is zero would.
 //
-// The value is a guess and has not been measured. Measuring it is a step of its
-// own: lower the slider until the wheels stop turning, then come back up.
+// Measured, on the floor and on the rover's own supply, by lowering the slider
+// until the wheels stopped turning and then coming back up. It replaces a
+// declared guess of 35, which left everything from 35 to 61 as a dead band that
+// drew current and produced no motion - the exact condition this constant
+// exists to keep out of. The speed curve behind it is in the journal.
 //
 // Checked on both sides. The slider will not go below it, and the firmware
 // refuses anything below it that arrives anyway. Neither trusts the other.
@@ -391,12 +394,26 @@ constexpr unsigned long COMMAND_SEND_INTERVAL_MS = 120;
 // It is not a way to stop. At the minimum the rover crawls, it does not halt.
 // Releasing the button stops it, and the watchdog stops it when nothing
 // releases anything.
-constexpr uint8_t DRIVE_MIN_PERCENT = 35;
+constexpr uint8_t DRIVE_MIN_PERCENT = 62;
 
-// Where the slider sits when the page loads. Deliberately near the bottom: the
-// first runs on a floor happen indoors, and a rover that starts at full power
-// finds a wall.
-constexpr uint8_t DRIVE_START_PERCENT = 47;
+// Where the slider sits when the page loads. Deliberately low: the first runs
+// on a floor happen indoors, and a rover that starts at full power finds a
+// wall.
+//
+// Kept clear of the floor rather than sitting on it. 62 is where the wheels
+// were seen to start, which makes it an edge rather than a safe setting, and a
+// default with no margin above it is one that depends on the surface being the
+// one it was measured on. 75 is the middle of the three runs that were timed,
+// about 50 cm/s, and still slow indoors.
+constexpr uint8_t DRIVE_START_PERCENT = 75;
+
+// Nothing checked the relation between these two, and the default had been left
+// below the floor. What a browser does with a range value under its minimum was
+// not tested and is beside the point: the page would carry a setting this
+// firmware is required to reject, which is an invalid state whatever it looks
+// like on screen. Cheaper to make it a compile error than to notice it later.
+static_assert(DRIVE_START_PERCENT >= DRIVE_MIN_PERCENT,
+              "slider default must not sit below the floor");
 
 // Brightness steps the brake light cycles through, as percentages.
 constexpr uint8_t BRAKE_DUTY_PERCENTS[] = {25, 50, 75, 100};
