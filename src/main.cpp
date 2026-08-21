@@ -415,6 +415,47 @@ constexpr uint8_t DRIVE_START_PERCENT = 75;
 static_assert(DRIVE_START_PERCENT >= DRIVE_MIN_PERCENT,
               "slider default must not sit below the floor");
 
+// --- AEB (autonomous emergency braking) ---
+// Three stages by distance to whatever is in front.
+//
+// NONE OF THESE IS MEASURED. At 84.4 cm/s the rover covers about 8.4 cm between
+// two distance reads, which is the floor under any threshold and under the
+// hysteresis. The braking distance itself has never been measured, so whether
+// 20 cm leaves room is open. Stop also stays clear of the sensor's blind zone
+// under ~2 cm, where the transmitter still rings as the echo arrives.
+constexpr float AEB_WARN_CM = 60.0f;
+constexpr float AEB_SLOW_CM = 35.0f;
+constexpr float AEB_STOP_CM = 20.0f;
+
+// How much further out before a stage is left again. Without it a reading
+// resting on a threshold flickers across it on noise alone. Entering is
+// immediate, leaving is reluctant: escalating late is a collision.
+constexpr float AEB_HYSTERESIS_CM = 8.0f;
+
+// Derived, so the three exits cannot drift out of step with the entries.
+constexpr float AEB_WARN_EXIT_CM = AEB_WARN_CM + AEB_HYSTERESIS_CM;
+constexpr float AEB_SLOW_EXIT_CM = AEB_SLOW_CM + AEB_HYSTERESIS_CM;
+constexpr float AEB_STOP_EXIT_CM = AEB_STOP_CM + AEB_HYSTERESIS_CM;
+
+static_assert(AEB_STOP_CM < AEB_SLOW_CM && AEB_SLOW_CM < AEB_WARN_CM,
+              "AEB stages must escalate as the distance shrinks");
+
+// An exit above the next entry would re-enter the stage above on the way out,
+// leaving the rover oscillating between two stages instead of settling.
+static_assert(AEB_STOP_EXIT_CM < AEB_SLOW_CM && AEB_SLOW_EXIT_CM < AEB_WARN_CM,
+              "hysteresis must not reach into the next stage");
+
+// Failed readings tolerated in a row before the silence is acted on. One missed
+// echo is ordinary, and readEchoMedian already needs two of three samples, so a
+// zero is a mostly failed measurement rather than one bad sample. Three is about
+// 300 ms, some 25 cm at full power.
+constexpr uint8_t AEB_MISSED_READS_LIMIT = 3;
+
+// One value, not a flag per stage: with four booleans there is a state where
+// Warn and Stop are both set and something has to decide which wins. The order
+// is compared directly - larger is more severe - so keep it.
+enum class AebStage : uint8_t { Clear, Warn, Slow, Stop };
+
 // Brightness steps the brake light cycles through, as percentages.
 constexpr uint8_t BRAKE_DUTY_PERCENTS[] = {25, 50, 75, 100};
 constexpr size_t BRAKE_DUTY_STEPS =
@@ -468,6 +509,16 @@ int16_t commandedLeft = 0;
 int16_t commandedRight = 0;
 unsigned long lastCommandMs = 0;
 bool commandTimedOut = true;
+
+// Starts Clear because nothing has been measured yet, not because the road is
+// known to be empty. The first reading, 100 ms in, replaces it.
+AebStage aebStage = AebStage::Clear;
+uint8_t aebMissedReads = 0;
+
+// The last distance that actually came back, kept because a missing echo means
+// different things depending on what preceded it. Started just outside the warn
+// threshold, which is the assumption made before any reading exists: open road.
+float aebLastValidCm = AEB_WARN_CM + 1.0f;
 
 // Percentages are the readable unit; the hardware wants raw counts.
 static uint32_t dutyFromPercent(uint8_t percent) {
@@ -627,6 +678,118 @@ static unsigned long readEchoMedian() {
 // again, so the distance to the obstacle is half of what the sound covered.
 static float distanceFromDuration(unsigned long durationUs) {
   return (durationUs * SOUND_SPEED_CM_PER_US) / 2.0f;
+}
+
+// Names the stage for the log. All four listed rather than a default, so a
+// stage added later warns here instead of printing as something else.
+static const char *aebStageName(AebStage stage) {
+  switch (stage) {
+  case AebStage::Clear:
+    return "CLEAR";
+  case AebStage::Warn:
+    return "WARN";
+  case AebStage::Slow:
+    return "SLOW";
+  case AebStage::Stop:
+    return "STOP";
+  }
+  return "?";
+}
+
+// Picks the stage from the reading the loop has just taken. Called once per
+// measurement rather than once per pass: the input only changes ten times a
+// second. It decides and reports and does nothing else - enforcement belongs
+// inside safeDrive, where no caller can route around it.
+static void updateAebStage() {
+  const AebStage previous = aebStage;
+  float distanceCm = 0.0f;
+
+  if (echoDurationValue == 0) {
+    aebMissedReads++;
+
+    // Under the limit the stage is held. One lost echo is the absence of
+    // evidence, not evidence that anything ahead changed.
+    if (aebMissedReads < AEB_MISSED_READS_LIMIT) {
+      return;
+    }
+
+    // Saturated, so a long outage cannot wrap the counter and hand the
+    // tolerance back from zero.
+    aebMissedReads = AEB_MISSED_READS_LIMIT;
+
+    // Sustained silence means opposite things depending on what came before it.
+    // Losing the echo at three metres is open road - the module only reaches
+    // about four. Losing it at fifteen is something close, possibly inside the
+    // blind zone under 2 cm, which returns nothing at all.
+    //
+    // The hole this leaves is a sensor that dies while the road really is
+    // empty: the last reading is large, the stage stays Clear, and nothing
+    // brakes. Closing it would mean stopping in every open room.
+    aebStage =
+        (aebLastValidCm <= AEB_WARN_CM) ? AebStage::Stop : AebStage::Clear;
+  } else {
+    aebMissedReads = 0;
+    distanceCm = distanceFromDuration(echoDurationValue);
+    aebLastValidCm = distanceCm;
+
+    AebStage byDistance = AebStage::Clear;
+    if (distanceCm <= AEB_STOP_CM) {
+      byDistance = AebStage::Stop;
+    } else if (distanceCm <= AEB_SLOW_CM) {
+      byDistance = AebStage::Slow;
+    } else if (distanceCm <= AEB_WARN_CM) {
+      byDistance = AebStage::Warn;
+    }
+
+    if (byDistance > aebStage) {
+      // Escalation skips nothing. Something appearing inside the stop threshold
+      // goes straight there rather than stepping down over three readings,
+      // which at full power would be a quarter of a metre.
+      aebStage = byDistance;
+    } else {
+      // Leaving takes one stage per reading, and only past the exit threshold,
+      // so backing away from a wall takes about 300 ms to reach Clear.
+      switch (aebStage) {
+      case AebStage::Stop:
+        if (distanceCm > AEB_STOP_EXIT_CM) {
+          aebStage = AebStage::Slow;
+        }
+        break;
+      case AebStage::Slow:
+        if (distanceCm > AEB_SLOW_EXIT_CM) {
+          aebStage = AebStage::Warn;
+        }
+        break;
+      case AebStage::Warn:
+        if (distanceCm > AEB_WARN_EXIT_CM) {
+          aebStage = AebStage::Clear;
+        }
+        break;
+      case AebStage::Clear:
+        break;
+      }
+    }
+  }
+
+  // Transitions only, and behind no log switch: this is an event, like the
+  // watchdog message. The distance goes with it because that is what a
+  // calibration run compares against a ruler.
+  if (aebStage != previous) {
+    Serial.print("AEB  ");
+    Serial.print(aebStageName(previous));
+    Serial.print(" -> ");
+    Serial.print(aebStageName(aebStage));
+
+    if (echoDurationValue == 0) {
+      Serial.print("  no echo, last ");
+      Serial.print(aebLastValidCm, 1);
+      Serial.println(" cm");
+    } else {
+      Serial.print("  at ");
+      Serial.print(distanceCm, 1);
+      Serial.println(" cm");
+    }
+  }
 }
 
 // Draws the one-off screen that proves the panel works and that the configured
@@ -1091,6 +1254,11 @@ void loop() {
         Serial.println("cm");
       }
     }
+
+    // Inside the same block as the read, so the stage is only reconsidered
+    // when there is something new to reconsider it from. Nothing acts on it
+    // yet: safeDrive still forwards untouched.
+    updateAebStage();
   }
 
   // The watchdog, and the single place the motors are written.
