@@ -242,7 +242,6 @@ constexpr uint32_t PWM_MAX_DUTY =
     (1UL << PWM_RESOLUTION_BITS) - 1; // UL unsigned long
 
 // --- Timing ---
-constexpr unsigned long BRAKE_STEP_INTERVAL_MS = 1000;
 constexpr unsigned long LINE_PRINT_INTERVAL_MS = 200;
 constexpr unsigned long DISTANCE_READ_INTERVAL_MS = 100;
 
@@ -274,7 +273,6 @@ constexpr unsigned long SERIAL_BAUD = 115200;
 // Events are deliberately absent from this list and are never silenced: a
 // rejected command, the watchdog firing, a failed init, the addresses reported
 // at boot. Those are not reports that repeat, they are things that happened.
-constexpr bool LOG_BRAKE = false;
 constexpr bool LOG_BUTTON = false;
 constexpr bool LOG_LINE = false;
 constexpr bool LOG_DISTANCE = false;
@@ -447,24 +445,14 @@ static_assert(AEB_STOP_EXIT_CM < AEB_SLOW_CM && AEB_SLOW_EXIT_CM < AEB_WARN_CM,
 
 // Failed readings tolerated in a row before the silence is acted on. One missed
 // echo is ordinary, and readEchoMedian already needs two of three samples, so a
-// zero is a mostly failed measurement rather than one bad sample. Three is about
-// 300 ms, some 25 cm at full power.
+// zero is a mostly failed measurement rather than one bad sample. Three is
+// about 300 ms, some 25 cm at full power.
 constexpr uint8_t AEB_MISSED_READS_LIMIT = 3;
 
 // One value, not a flag per stage: with four booleans there is a state where
 // Warn and Stop are both set and something has to decide which wins. The order
 // is compared directly - larger is more severe - so keep it.
 enum class AebStage : uint8_t { Clear, Warn, Slow, Stop };
-
-// Brightness steps the brake light cycles through, as percentages.
-constexpr uint8_t BRAKE_DUTY_PERCENTS[] = {25, 50, 75, 100};
-constexpr size_t BRAKE_DUTY_STEPS =
-    sizeof(BRAKE_DUTY_PERCENTS) / sizeof(BRAKE_DUTY_PERCENTS[0]);
-
-// Store when the last step happened rather than when the next one is due:
-// unsigned subtraction stays correct when millis() rolls over (~49 days).
-unsigned long lastBrakeStep = 0;
-size_t brakeDutyIndex = 0;
 
 // Previous button reading, so the loop can report changes instead of flooding
 // the serial line on every pass while the button is held down.
@@ -525,15 +513,24 @@ static uint32_t dutyFromPercent(uint8_t percent) {
   return (static_cast<uint32_t>(percent) * PWM_MAX_DUTY) / 100;
 }
 
-static void applyBrakeDuty(size_t index) {
-  const uint8_t percent = BRAKE_DUTY_PERCENTS[index];
-  ledcWrite(PIN_BRAKE_LIGHT, dutyFromPercent(percent));
+// Drives the two warning outputs from the current stage.
+//
+// Both are gated on the operator actually asking for movement. A rover parked
+// near a wall with nobody touching anything is not braking and has nothing to
+// announce, and a warning that never stops carries no information - real
+// parking sensors behave the same way.
+//
+// The brake light follows the stages that actually slow the rover down rather
+// than the one that only warns, the same as a car: the lamps mean deceleration,
+// not concern. The buzzer covers all three, because a warning nobody can see
+// from behind still has to reach the operator.
+static void applyAebOutputs(bool motionRequested) {
+  const bool sounding = motionRequested && aebStage != AebStage::Clear;
+  const bool braking = motionRequested && (aebStage == AebStage::Slow ||
+                                           aebStage == AebStage::Stop);
 
-  if (LOG_BRAKE) {
-    Serial.print("BRAKE LIGHT DUTY ");
-    Serial.print(percent);
-    Serial.println("%");
-  }
+  digitalWrite(PIN_BUZZER, sounding ? BUZZER_SOUND : BUZZER_SILENT);
+  ledcWrite(PIN_BRAKE_LIGHT, braking ? PWM_MAX_DUTY : 0);
 }
 
 // Sets both sides at once. Each argument carries speed in its magnitude and
@@ -582,9 +579,16 @@ static void drive(int16_t left, int16_t right) {
 // at that moment there is no distance reading for an AEB to reason about
 // anyway.
 //
-// Do not delete this for doing nothing. Doing nothing is its correct behaviour
-// for now.
-static void safeDrive(int16_t left, int16_t right) { drive(left, right); }
+// It still forwards untouched. What it has gained is the warning outputs, set
+// from here rather than from the loop so they cannot disagree with the motors:
+// whatever this call passes on, the indicators were decided from the same
+// values in the same pass. Writing them every pass rewrites the same registers
+// most of the time, which costs nothing and leaves no way for an indicator to
+// be left behind.
+static void safeDrive(int16_t left, int16_t right) {
+  applyAebOutputs(left != 0 || right != 0);
+  drive(left, right);
+}
 
 // One reader for both sensors — they are the same part on the same ADC, so the
 // pin is the only thing that differs.
@@ -870,8 +874,8 @@ static void handleRoot() {
   String page = PAGE_HTML;
 
   // Every number the page needs comes from a constant here, so none of them is
-  // written down twice. The slider's floor in particular will change once it has
-  // been measured, and the page has to follow without being edited.
+  // written down twice. The slider's floor in particular will change once it
+  // has been measured, and the page has to follow without being edited.
   page.replace("%POLL_MS%", String(WEB_POLL_INTERVAL_MS));
   page.replace("%SEND_MS%", String(COMMAND_SEND_INTERVAL_MS));
   page.replace("%MIN_PERCENT%", String(DRIVE_MIN_PERCENT));
@@ -1148,10 +1152,10 @@ void setup() {
   startAccessPoint();
   startWebServer();
 
-  Serial.print("SafeRover boot OK - brake light PWM on GPIO ");
+  // No initial write to either warning output. safeDrive sets both on every
+  // pass, so the first one happens within a millisecond of the loop starting.
+  Serial.print("SafeRover boot OK - AEB brake light on GPIO ");
   Serial.println(PIN_BRAKE_LIGHT);
-
-  applyBrakeDuty(brakeDutyIndex);
 
   // A power-on self test, and a permanent one. It began as a way to prove the
   // buzzer worked at all, and the reason to keep it arrived later: its VCC is
@@ -1178,15 +1182,6 @@ void setup() {
 
 void loop() {
   const unsigned long now = millis();
-
-  // delay() is banned here by project convention: it blocks the whole loop, and
-  // later phases must keep polling the ultrasonic sensor while this steps.
-  if (now - lastBrakeStep >= BRAKE_STEP_INTERVAL_MS) {
-    lastBrakeStep = now;
-
-    brakeDutyIndex = (brakeDutyIndex + 1) % BRAKE_DUTY_STEPS;
-    applyBrakeDuty(brakeDutyIndex);
-  }
 
   // Report transitions only, and only once the debounce window has passed. The
   // metal contacts bounce for a few milliseconds on every open and close, which
