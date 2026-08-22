@@ -3,13 +3,13 @@
 A small autonomous rover that demonstrates two active automotive safety systems —
 **Autonomous Emergency Braking (AEB)** and **Lane Keeping Assist (LKA)** — on an ESP32.
 
-> 🚧 **Status:** In active development. **The rover drives from a phone.** It serves its
-> own Wi-Fi network and a dashboard that shows the sensor readings live and steers the
-> vehicle, and it stops itself when the commands stop arriving. Before that: fully wired,
-> with four motors under PWM on a split supply, both line sensors and the ultrasonic
-> sensor calibrated at their mounted height, and the OLED, brake lights, status LED,
-> mode button and buzzer all verified in place. Next is AEB — the first of the two
-> safety systems. See the [roadmap](#roadmap).
+> 🚧 **Status:** In active development. **The rover brakes for obstacles on its own.**
+> AEB runs in three escalating stages with hysteresis, and it cannot be bypassed —
+> hold the forward button at a wall from the phone and the rover refuses, while
+> reverse and pivot turns stay free so it can always back out of what it stopped for.
+> Before that: driving from a phone over the rover's own Wi-Fi with a watchdog that
+> stops it when commands stop arriving, and every component wired and calibrated on
+> the vehicle. Next is LKA — the second safety system. See the [roadmap](#roadmap).
 
 SafeRover runs two independent closed control loops (sense → decide → act) on top of a
 real-time state machine.
@@ -27,14 +27,35 @@ SafeRover drives on a small track and runs in three modes:
 Two safety layers run on top of *every* mode:
 
 ### 🛑 AEB — Autonomous Emergency Braking
-A front ultrasonic sensor measures distance continuously and brakes in three escalating
-stages, like a real car:
 
-`WARN` (buzzer + brake lights) → `SLOW` (forced deceleration) → `STOP` (full brake)
+A front ultrasonic sensor measures distance ten times a second and escalates through
+three stages, like a real car:
 
-…with **hysteresis** to prevent jitter at the thresholds.
-**This layer overrides every command — it is active even in manual mode.** You cannot drive
-the rover into a wall.
+| Stage | At | What happens |
+|-------|---:|--------------|
+| `WARN` | 90 cm | buzzer only — the speed is untouched |
+| `SLOW` | 55 cm | forced ceiling on speed, buzzer and brake lights |
+| `STOP` | 35 cm | the motors are shorted through the bridge and held, buzzer and brake lights |
+
+**This layer overrides every command, including manual driving.** Hold the forward
+button at a wall and the rover simply refuses. Braking is active rather than coasting,
+because momentum would otherwise carry the rover into what it had just detected.
+
+A stage is entered the moment its threshold is crossed but only left **8 cm further
+out**, so a reading resting on a threshold cannot flicker across it. Escalating late is
+a collision; de-escalating late is a fraction of a second of caution.
+
+Two decisions in it are worth more than the thresholds:
+
+- **Reverse and pivot turns are never limited.** The sensor faces forward, so an
+  obstacle ahead only matters while the rover drives at it. A rover pinned against a
+  wall with the only commands that would free it refused is a worse failure than the
+  one being prevented.
+- **A missing echo is never read as clear road.** It is not a distance at all, and what
+  it means depends on the last real reading: lost at three metres is open space, lost
+  at fifteen centimetres is something close, possibly inside the sensor's blind zone.
+  The thresholds themselves were raised after the first runs on the floor — the
+  reasoning is in the [journal](docs/journal.md).
 
 ### 🛣️ LKA — Lane Keeping Assist
 The rover runs inside a white lane marked by two black stripes, with one infrared sensor
@@ -163,11 +184,11 @@ The firmware is split into modules, each built and tested in isolation:
 **Design rule:** all driving goes through the safety layer — navigation and manual control
 call `safeDrive(...)`, never the motors directly, so AEB is impossible to bypass.
 
-`safeDrive()` is already in place and today only forwards to `drive()`. It was built
-before it had any callers on purpose: adding the seam afterwards would mean finding and
-converting every one of them, and a single missed call would be a silent way around the
-brakes that no test would catch. When phase 5 puts the AEB stages inside it, not a line of
-the code that decides *where to go* has to change.
+`safeDrive()` was built in phase 4 as an empty seam, before it had any callers, and the
+AEB moved into it in phase 5. That is the payoff: **not one line of the code that decides
+where to go had to change** when the braking arrived. Adding the seam afterwards would
+have meant finding and converting every caller, and a single missed call would be a
+silent way around the brakes that no test would catch.
 
 ---
 
@@ -227,7 +248,7 @@ pio run -e i2c-scanner -t upload
 | 2 | Sensors on the bench — OLED, ultrasonic, line sensors | ✅ |
 | 3 | Vehicle moves — chassis, power, straight-line trim | ✅ |
 | 4 | Phone control — Wi-Fi dashboard + watchdog stop | ✅ |
-| 5 | AEB — 3-stage braking + hysteresis | ⬜ |
+| 5 | AEB — 3-stage braking + hysteresis | ✅ |
 | 6 | LKA — track + P-controller tuning | ⬜ |
 | 7 | Brain — state machine + non-blocking loop | ⬜ |
 | 8 | IoT — live dashboard, NTP, cloud event log | ⬜ |
@@ -244,7 +265,7 @@ coming together.
 A build log with the measurements and the faults hit along the way is in
 [`docs/journal.md`](docs/journal.md).
 
-_A demo video will follow once the rover drives._
+_A demo video will follow._
 
 ---
 
