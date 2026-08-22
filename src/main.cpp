@@ -449,10 +449,27 @@ static_assert(AEB_STOP_EXIT_CM < AEB_SLOW_CM && AEB_SLOW_EXIT_CM < AEB_WARN_CM,
 // about 300 ms, some 25 cm at full power.
 constexpr uint8_t AEB_MISSED_READS_LIMIT = 3;
 
+// The ceiling the Slow stage imposes, as a percentage of full power. It has to
+// stay above DRIVE_MIN_PERCENT: under the floor the rover does not slow down,
+// it stops, and a stage that quietly becomes the stage below it is worse than
+// no stage at all.
+constexpr uint8_t AEB_SLOW_PERCENT = 70;
+static_assert(AEB_SLOW_PERCENT >= DRIVE_MIN_PERCENT,
+              "the slow stage must still be able to move the rover");
+
+// How old the last reading may be before the stage stops being trusted.
+// Derived from the read interval, so it follows if that changes. Three
+// intervals means the loop has stopped measuring rather than run slightly late.
+constexpr unsigned long AEB_READING_MAX_AGE_MS = DISTANCE_READ_INTERVAL_MS * 3;
+
 // One value, not a flag per stage: with four booleans there is a state where
 // Warn and Stop are both set and something has to decide which wins. The order
 // is compared directly - larger is more severe - so keep it.
 enum class AebStage : uint8_t { Clear, Warn, Slow, Stop };
+
+// What a stop means at the motors. Coasting drops the duty to zero and lets the
+// wheels roll on; braking shorts each motor through the bridge and holds it.
+enum class StopMode : uint8_t { Coast, Brake };
 
 // Previous button reading, so the loop can report changes instead of flooding
 // the serial line on every pass while the button is held down.
@@ -524,10 +541,14 @@ static uint32_t dutyFromPercent(uint8_t percent) {
 // than the one that only warns, the same as a car: the lamps mean deceleration,
 // not concern. The buzzer covers all three, because a warning nobody can see
 // from behind still has to reach the operator.
-static void applyAebOutputs(bool motionRequested) {
-  const bool sounding = motionRequested && aebStage != AebStage::Clear;
-  const bool braking = motionRequested && (aebStage == AebStage::Slow ||
-                                           aebStage == AebStage::Stop);
+//
+// The stage arrives as an argument rather than being read from the global, so
+// the indicators report the stage that was actually enforced - including one
+// forced by a stale reading, which the global does not know about.
+static void applyAebOutputs(bool motionRequested, AebStage stage) {
+  const bool sounding = motionRequested && stage != AebStage::Clear;
+  const bool braking =
+      motionRequested && (stage == AebStage::Slow || stage == AebStage::Stop);
 
   digitalWrite(PIN_BUZZER, sounding ? BUZZER_SOUND : BUZZER_SILENT);
   ledcWrite(PIN_BRAKE_LIGHT, braking ? PWM_MAX_DUTY : 0);
@@ -542,7 +563,27 @@ static void applyAebOutputs(bool motionRequested) {
 // that is exactly what the bench sequence below is for. Setting both pins to
 // the same level would brake the side rather than turn it, which is why they
 // are always written as a pair.
-static void drive(int16_t left, int16_t right) {
+//
+// The third argument says what a stop means, and it has no default: every
+// caller has to state it. Braking is a whole-vehicle action, so it ignores the
+// two speeds rather than pretending to mix with them.
+static void drive(int16_t left, int16_t right, StopMode stop) {
+  if (stop == StopMode::Brake) {
+    // Both direction pins of a side at the same level short that motor through
+    // the bridge, and its own momentum then works against it. The enable has to
+    // stay high for any of that to reach the windings: at duty zero the outputs
+    // are disconnected and the wheels roll on no matter what the direction pins
+    // say, which is exactly what coasting is.
+    digitalWrite(PIN_MOTOR_IN1, LOW);
+    digitalWrite(PIN_MOTOR_IN2, LOW);
+    digitalWrite(PIN_MOTOR_IN3, LOW);
+    digitalWrite(PIN_MOTOR_IN4, LOW);
+
+    ledcWrite(PIN_MOTOR_ENA, PWM_MAX_DUTY);
+    ledcWrite(PIN_MOTOR_ENB, PWM_MAX_DUTY);
+    return;
+  }
+
   const bool leftForward = (left >= 0);
   digitalWrite(PIN_MOTOR_IN1, leftForward ? HIGH : LOW);
   digitalWrite(PIN_MOTOR_IN2, leftForward ? LOW : HIGH);
@@ -563,31 +604,51 @@ static void drive(int16_t left, int16_t right) {
 }
 
 // The one door to the motors, and the only thing any driving decision is
-// allowed to call. Today it just forwards, and that is the whole intent: this
-// is a seam, not an abstraction.
+// allowed to call. Manual control already comes through here and the lane
+// keeping will too, so the AEB intercepts every one of them without a line of
+// the code that decides where to go being touched. A safety layer that
+// navigation can route around is not a safety layer.
 //
-// Phase 5 puts the AEB stages here - WARN, SLOW, STOP with hysteresis. Because
-// manual control and, later, the lane keeping already come through here rather
-// than through drive(), that layer arrives without a single line of the code
-// that decides where to go being touched. Adding the seam later would mean
-// finding and converting every caller, and one missed call would be a silent
-// way around the brakes that no test would catch. A safety layer navigation
-// code can route around is not a safety layer.
-//
-// The one exception is drive(0, 0) in setup(). That is hardware initialisation
+// The one exception is the drive() in setup(). That is hardware initialisation
 // rather than a driving decision - the direction pins come up undefined - and
-// at that moment there is no distance reading for an AEB to reason about
-// anyway.
-//
-// It still forwards untouched. What it has gained is the warning outputs, set
-// from here rather than from the loop so they cannot disagree with the motors:
-// whatever this call passes on, the indicators were decided from the same
-// values in the same pass. Writing them every pass rewrites the same registers
-// most of the time, which costs nothing and leaves no way for an indicator to
-// be left behind.
+// at that moment there is no reading to reason about.
 static void safeDrive(int16_t left, int16_t right) {
-  applyAebOutputs(left != 0 || right != 0);
-  drive(left, right);
+  // Its own clock rather than one handed in: a caller cannot pass a stale
+  // timestamp and talk this layer out of the check below.
+  const bool readingStale =
+      (millis() - lastDistanceRead) > AEB_READING_MAX_AGE_MS;
+
+  // A missing echo can honestly mean open road, and updateAebStage treats it as
+  // such. A reading that has stopped arriving at all cannot mean anything but a
+  // fault, and a fault in the braking layer fails towards stopping.
+  const AebStage stage = readingStale ? AebStage::Stop : aebStage;
+
+  applyAebOutputs(left != 0 || right != 0, stage);
+
+  // Reverse and pivot turns are escapes and are never limited. A rover pinned
+  // against a wall by its own safety layer, with the only commands that would
+  // free it refused, is a worse failure than the one being prevented. In
+  // differential steering a negative side is exactly one of those manoeuvres,
+  // and the sensor only faces forward anyway.
+  if (left < 0 || right < 0) {
+    drive(left, right, StopMode::Coast);
+    return;
+  }
+
+  if (stage == AebStage::Stop) {
+    drive(0, 0, StopMode::Brake);
+    return;
+  }
+
+  if (stage == AebStage::Slow) {
+    // A ceiling, never an assignment. A command already slower than this passes
+    // through untouched: this layer is only ever allowed to take speed away.
+    const int16_t cap = static_cast<int16_t>(dutyFromPercent(AEB_SLOW_PERCENT));
+    left = min(left, cap);
+    right = min(right, cap);
+  }
+
+  drive(left, right, StopMode::Coast);
 }
 
 // One reader for both sensors — they are the same part on the same ADC, so the
@@ -1109,7 +1170,11 @@ void setup() {
   // Stopped before anything else runs. The direction pins power up in an
   // undefined state, and four motors on a chassis with no caster will happily
   // drive off a bench while the rest of setup() is still going.
-  drive(0, 0);
+  //
+  // Coast rather than brake: this is a rover that has not moved yet, so there
+  // is no momentum to hold against, and braking would leave both enable pins
+  // driven for the whole of setup() for nothing.
+  drive(0, 0, StopMode::Coast);
 
   // TRIG is driven by us, ECHO is read. Parking TRIG LOW here means the module
   // is not looking at a half-raised line before the first measurement runs.
