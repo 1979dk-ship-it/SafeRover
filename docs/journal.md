@@ -17,6 +17,10 @@ with little rewriting:
 Entries run oldest first. Sessions 1 and 2 were written retroactively on 2026-07-28;
 from session 3 onward each entry is written the same day.
 
+The wording and structure of these entries were worked out with the help of an AI
+assistant. The observations, the measurements, the faults and the decisions they
+record are the author's own.
+
 ---
 
 ## Session 1 — 2026-06-24 — Development environment setup
@@ -1953,3 +1957,364 @@ findings below are results of the measurements, not faults.
 
 ### Next up
 Update `DRIVE_MIN_PERCENT` to the measured value, and then plan phase 5.
+
+---
+
+## Session 21 — 2026-08-19 — The measured floor, and a check that checked something else
+
+### Goal
+Put the figure measured earlier the same day into the code, which is exactly
+what the previous entry left as the next action.
+
+### What was done
+
+`DRIVE_MIN_PERCENT` went from 35 to 62. Its comment changed with it: the
+paragraph admitting the value was a guess became a record of how it was
+measured — lowering the slider until the wheels stopped turning, then coming
+back up — with 35 kept in the text as what it replaced and why.
+
+That change immediately exposed a second constant that had become invalid
+without anyone touching it, which is the first fault below.
+
+A `static_assert` was added between the two, and verified by temporarily setting
+an invalid value and confirming the build failed with the intended message. A
+build that passes proves an assertion compiles, not that it fires.
+
+The comment on `COMMAND_TIMEOUT_MS` was brought up to date at the same time —
+half a second is about 42 cm at full power and about 16 at the minimum. The
+timeout itself was left alone.
+
+### Problems & challenges
+
+**Fault 1 — a slider default below the floor it was checked against**
+
+- **Symptom:** raising the floor to 62 left the page's default at 47, so the
+  served page would carry a speed the firmware refuses.
+- **Diagnosis:** two constants two lines apart, with nothing comparing them. The
+  relationship between them existed only in the memory of whoever wrote them,
+  and moving one did not disturb the other. 47 had been a sensible place when
+  the floor was 35.
+- **Solution:** the default moved to 75 — a setting that had actually been timed,
+  kept clear of the floor rather than sitting on it, because 62 is the edge at
+  which the wheels still turn and a default with no margin above it depends on
+  the surface being the one it was measured on. The `static_assert` now makes the
+  relationship a compile-time requirement.
+- **Deliberately not claimed:** what a browser does with a range input whose
+  value is below its minimum was never tested. The defect is that the page would
+  carry a setting the firmware must reject, which is an invalid state whatever it
+  looks like on screen. Predicting the symptom would have been a guess dressed as
+  a finding.
+
+**Fault 2 — an initialisation check that did not check what its comment said**
+
+Carried over from an earlier working session that was not written up at the
+time, and recorded here rather than left unrecorded.
+
+- **Symptom:** none observed — the display works. The defect was in a comment,
+  which is the kind that only surfaces when somebody repeats it out loud.
+- **Diagnosis:** the comment beside the OLED initialisation said `begin()`
+  returns false when the panel does not answer. Reading the library showed one
+  `return false` in the entire function, on the framebuffer allocation, and no
+  test of an I2C acknowledgement anywhere — all five `endTransmission()` calls
+  discard their result. An unplugged panel still returns true. What the check
+  actually reports is whether 512 bytes could be allocated.
+- **Solution:** the comment was corrected, and the serial message with it, since
+  that message named the wrong controller chip as a suspect for a failure that
+  can only mean the heap was full. The check itself was kept, for a reason the
+  old comment never gave: `drawPixel` indexes the buffer with no null test, so
+  drawing after a failed allocation would write through a null pointer.
+- **What it sharpens about session 10:** an acknowledgement test would not have
+  caught that fault either. The controller answered on the bus throughout — the
+  scan succeeded three times out of three — and what had come loose was the
+  ribbon between the controller and the glass, which is downstream of anything
+  I2C can observe.
+
+### Decisions & rationale
+
+- **The replaced value stays in the comment.** 35 is not deleted; it is recorded
+  as what was there and why it was wrong, so the history of the number survives
+  in the place the number lives.
+- **The floor is not the default.** A measured edge and a good starting point are
+  different things. Sitting on the edge makes the first press of a button depend
+  on the surface.
+- **`COMMAND_TIMEOUT_MS` keeps its value.** The measurement produced a number,
+  not a verdict. Whether 42 cm is acceptable on a small track is a separate
+  decision that has not been taken, and the comment now says so.
+
+### Next up
+Plan phase 5 — the AEB — before writing any of it.
+
+---
+
+## Session 22 — 2026-08-21 — Planning the AEB, and a stage machine with no teeth
+
+### Goal
+Plan phase 5 in full and get the plan approved before writing anything, then
+build the parts of it that cannot move the rover.
+
+### What was done
+
+**The phase was planned first, with no code written in that round.** The plan
+covered what would count as success and how each part would be known to work, an
+implementation order with the reason each step sits where it does, how the state
+would be represented and where the decision would be taken, the points at which
+a fault turns into unwanted movement or into a stop that did not happen, what
+would be tested at each step, and the decisions the plan refused to take on its
+own.
+
+Six of those were raised rather than settled, and then taken:
+
+1. **The AEB limits forward motion only.** Reverse and pivot turns are escapes. A
+   rover pinned against a wall with the only commands that would free it refused
+   is a worse failure than the one being prevented.
+2. **Stop brakes actively rather than coasting.** Momentum would otherwise carry
+   the rover into what it had just detected.
+3. **The phase 1 brake light demo is deleted, not overridden.** Two writers to
+   one pin make the indicator unreliable exactly when it becomes the diagnostic
+   tool.
+4. **The buzzer follows the command, not the output.** Pressing forward at a wall
+   should say "your command is being refused", and releasing should silence it.
+5. **Missing echoes are tolerated for three readings.** Revised almost at once —
+   see the fault below.
+6. **The stage is computed once per measurement, not once per loop pass.** The
+   physical input changes ten times a second; re-deriving the same answer between
+   readings buys nothing.
+
+**Stage one — the stage machine, observable only.** The thresholds, the
+hysteresis, the enum, the missing-echo handling and a log line on every
+transition. `safeDrive` was left forwarding untouched, so none of it could reach
+the motors. That is the whole point of the ordering: the hysteresis is the
+easiest part to get wrong, and it was verified in full while the layer was
+incapable of stopping anything.
+
+Entries were confirmed against a ruler at 60, 35 and 20 cm, and exits at 28, 43
+and 68 — the second of those being the test that actually matters, because equal
+numbers in both directions would mean there is no hysteresis at all, only a name
+for one.
+
+> **These thresholds no longer describe the firmware.** All three were raised in
+> session 23 after the first runs on the floor. The exit figures moved with them.
+
+**Stage two — the indicators.** Buzzer and brake light driven from the stage,
+still with no effect on movement. The brake light demo from phase 1 was removed
+along with its constants, its timer and its log flag, whose only consumer had
+just gone. The outputs are written from inside `safeDrive` rather than from the
+loop, so indicators and motors are decided from the same values in the same
+pass.
+
+### Problems & challenges
+
+**Fault 1 — a policy that would have stopped the rover in every open room**
+
+- **Symptom:** none. It was caught while the decision was being written up,
+  before any of it reached the file.
+- **Diagnosis:** the rule as first decided said three consecutive missing echoes
+  mean Stop. But the module only reaches about four metres, and past that it
+  returns nothing — the same zero a disconnected sensor returns. On an open
+  floor, or pointed at a doorway, the rover would have stopped every time there
+  was nothing in front of it. An empty road and a dead sensor produce an
+  identical signal.
+- **Solution:** the meaning of a sustained silence is taken from the last valid
+  reading. Lost at three metres is open road; lost at fifteen centimetres is
+  something close, possibly inside the blind zone under 2 cm, which returns
+  nothing at all. One comparison separates two opposite situations.
+- **What it deliberately leaves open:** a sensor that fails while the road really
+  is empty keeps a large last reading, the stage stays Clear, and nothing brakes.
+  Closing that hole would mean stopping in every open room, so it is accepted and
+  written into the comment rather than hidden.
+
+### Decisions & rationale
+
+- **Everything that stops the rover was built before anything that could move
+  it**, exactly as in phase 4. If the mechanism is wrong, it is better to find
+  that out while it cannot disable the vehicle.
+- **One value, not a flag per stage.** Four booleans admit a state where Warn and
+  Stop are both set, and something then has to decide which wins. A single
+  ordered value cannot express that state at all.
+- **Escalation is immediate, de-escalation is one stage per reading.** The
+  asymmetry is the design: escalating late is a collision, de-escalating late is
+  a few hundred milliseconds of caution.
+- **The exit thresholds are derived, not written.** Three numbers typed by hand
+  would be three chances to update two of them.
+- **A `static_assert` guards the hysteresis width.** An exit above the next
+  stage's entry would re-enter the stage above on the way out, and the rover
+  would oscillate between two stages rather than settle.
+- **The indicators are gated on the operator asking for movement.** A rover
+  parked near a wall with nobody driving is not braking and has nothing to
+  announce, and a warning that never stops carries no information.
+
+### Next up
+Stage three — the enforcement inside `safeDrive`.
+
+---
+
+## Session 23 — 2026-08-22 — The AEB gains teeth, and the first calibration
+
+### Goal
+Put the enforcement inside `safeDrive`, run the result on the floor, and
+calibrate against what the runs show.
+
+### What was done
+
+**Stage three — the intervention.** `drive()` gained a third argument saying
+what a stop means, with no default, so that every caller has to state it.
+Braking drives all four direction pins to the same level and holds both enables
+at full duty. The enable half is the one that is easy to miss: at duty zero the
+outputs are disconnected and the wheels roll on regardless of what the direction
+pins say, which is exactly what coasting is.
+
+`safeDrive` then runs in a fixed order — it checks how old the last reading is,
+resolves the stage, sets the indicators, lets escapes through untouched, brakes
+at Stop, and applies a ceiling at Slow. The ceiling is a `min()` and never an
+assignment, so a command already slower than the limit passes through unchanged:
+this layer is only ever allowed to take speed away.
+
+**The rover was then driven on the floor, and the braking works** — it detects a
+wall and stops at a sensible distance even at full power. Three problems came
+out of those runs and two more came out of reading the code afterwards. All five
+are below.
+
+**Calibration.** Thresholds went to 90, 55 and 35 cm, the read interval halved
+to 50 ms, and the Slow ceiling dropped from 70 to 66 percent. Four values moved
+at once, which is worth stating plainly: the timing explanation is supported by
+the result, but it was not isolated, and which of the four did the work is not
+known.
+
+**The distance sensor moved from the lower deck to the upper one.**
+
+### Problems & challenges
+
+**Fault 1 — braking too late at a wall**
+
+- **Symptom:** driven hard at a wall, the rover reacted later than it should
+  have. Watched by eye; the serial line was not being read during those runs, so
+  this is an observation and not a measurement.
+- **Diagnosis:** the measuring system is slow next to the thresholds it was
+  feeding. One reading blocks for up to 85 ms — three `pulseIn` calls at a 25 ms
+  timeout with two 5 ms gaps between them — and at 84.4 cm/s the rover covers
+  about 7 cm during a reading and more again between them. What the stage machine
+  holds can therefore describe a position some 15 cm out of date, and against a
+  20 cm stop threshold that was nearly the entire margin.
+- **Solution:** the thresholds were raised and the read rate doubled.
+- **A second explanation stands beside it, and it is not a rival suspect waiting
+  on evidence.** A smooth or angled wall reflects the burst away rather than
+  back, which would prevent detection outright instead of delaying it. That
+  cannot be ruled out by any number of successful runs — a run proves that *that*
+  wall returns an echo and says nothing about any other surface. It is a limit of
+  the sensing method rather than an open fault: ultrasound works by reflection, a
+  surface angled past roughly 15 degrees sends the burst sideways and a soft one
+  absorbs it, and no threshold creates information the sensor never received. The
+  dangerous half of it is already covered, because a lost echo after a close
+  reading escalates to Stop. What remains is an obstacle that was never seen at
+  all, which is the deliberate price of not stopping in every open room.
+
+**Fault 2 — the buzzer sounding while reversing away from an obstacle**
+
+- **Symptom:** stopped in front of a wall, driving backwards made the buzzer
+  sound. Reverse itself was correctly not blocked.
+- **Diagnosis:** the condition asked whether the rover was moving, not which way,
+  so reverse looked identical to forward. The sensor faces forward only, so an
+  obstacle in front is relevant exactly while the rover is heading towards it,
+  and reversing is the safest thing an operator can do in that position.
+  Announcing it says the opposite of what is meant.
+- **Solution:** the test moved from "not zero" to "positive", which is the sign
+  `drive()` already uses for forward.
+- **Recorded because it looks like an oversight and is not:** in a pivot one side
+  is positive and the other negative, so the warning stays on. That is correct —
+  turning on the spot does not take the rover away from what is in front of it.
+  The escape rule beside it asks the opposite question, whether any side is
+  negative, and a pivot answers yes to both: never limited, but still announced.
+
+**Fault 3 — the buzzer chirping on ordinary runs**
+
+- **Symptom:** during normal driving the buzzer would sound for a moment while
+  the brake light stayed dark. That combination is Warn, so the system was
+  behaving exactly as designed on a reading that meant nothing.
+- **Diagnosis:** it happens at Warn and nowhere else, which fits the distance. At
+  90 cm the echo has travelled 180 cm and is weak, and a glance off a wall to the
+  side or off furniture can return something of the same order.
+- **Solution:** Warn now has to hold for two consecutive readings before it
+  sounds, while Slow and Stop stay immediate. An early warning can afford to
+  confirm itself and braking cannot: Warn does not touch the speed, so one
+  reading of delay — about 4 cm at full power, at 90 cm out — costs nothing,
+  while the same delay in front of Stop would not be acceptable.
+- **Recorded as treating the symptom.** The cause is an outlying distance
+  reading. A general filter making every sharp jump prove itself was considered
+  and set aside: it would add logic to the most sensitive layer in the file, for
+  something that appears in one stage and never reaches the motors. If the same
+  flicker ever shows up in Slow or Stop, this fix will not help there.
+
+**Fault 4 — the floor returning as an obstacle**
+
+- **Symptom:** with the module mounted on the lower deck, readings sometimes came
+  back as though something were a short distance ahead on clear ground, and those
+  readings raised warnings.
+- **Diagnosis:** the beam spreads as it travels rather than staying a line. From
+  close to the ground, part of it reaches the floor at a shallow angle and
+  returns.
+- **Solution:** the module moved to the upper deck, and those readings stopped.
+- **Consequence for the code:** the mounting height is part of the calibration
+  and not a detail of how the module is fixed down, in the same way the line
+  sensors' 3.75 cm is. It is now written beside the pin definitions, so that
+  remounting it lower is known in advance to bring this back.
+
+**Fault 5 — a tolerance that halved itself, found by reading rather than running**
+
+- **Symptom:** none observed. The rover was working.
+- **Diagnosis:** the staleness limit was written as three read intervals, so
+  halving the read interval during calibration halved the tolerance with it, from
+  300 ms to 150, with nobody asking for it. A reading legitimately reaches an age
+  of about 85 to 95 ms, because that is how long a measurement takes, which left
+  roughly 55 ms of margin. The question the check asks is how long may have
+  passed since a reading, and that follows from how long a measurement takes
+  rather than from how often one is started — so deriving it from the interval
+  was a hidden dependency between two unrelated things.
+- **Solution:** it became an absolute 300 ms.
+- **Why it was worth fixing although the failure direction is safe:** the failure
+  would have been an unnecessary stop, which looks exactly like a threshold set
+  too high. It would have corrupted the next calibration instead of announcing
+  itself.
+
+**Fault 6 — a parked rover holding a brake it did not need**
+
+- **Symptom:** none observed; also found by reading.
+- **Diagnosis:** with no command at all and an obstacle within the stop
+  threshold, the code still took the braking path. Braking a rover that is not
+  moving arrests nothing, and it holds both enable pins at full duty
+  indefinitely, leaving the L298N conducting and warming slightly for a vehicle
+  nobody asked to move.
+- **Solution:** an early return when nothing is commanded, coasting instead. The
+  block itself is unchanged — a forward command is still refused at Stop. All
+  that changed is what happens when no command exists.
+
+### Decisions & rationale
+
+- **`drive()` gained a parameter rather than a sibling.** A separate braking
+  function would have read more cleanly but would have added a second writer to
+  the motor pins, and the claim worth being able to make is that there is one
+  door to the motors. A slightly awkward parameter is a fair price for keeping
+  that claim true.
+- **Escapes are never limited, and the test is the sign.** In differential
+  steering a negative side is a reverse or a pivot, which are exactly the
+  manoeuvres that free a trapped rover.
+- **`safeDrive` reads its own clock.** The staleness check would be worth nothing
+  if a caller could hand the layer a timestamp. Taking the time inside the
+  function removes that possibility rather than documenting against it.
+- **A missing echo and a missing reading are handled differently.** A missing
+  echo can honestly mean open road. A reading that has stopped arriving cannot
+  mean anything except a fault, and a fault in the braking layer fails towards
+  stopping.
+- **A known behaviour was left alone on purpose.** Leaving Warn resets its
+  confirmation counter, so coming down from Slow into Warn silences the buzzer
+  for one reading — roughly 50 ms — before it resumes. It is very likely
+  inaudible. It could be removed by requiring confirmation only when escalating
+  from Clear, and that was rejected for now: it adds logic to the most sensitive
+  layer in the file at the moment the AEB has just settled.
+- **The braking distance is still not measured, and that is not treated as
+  blocking.** The thresholds work. What is missing is knowing how much of the
+  35 cm is spent on sensing lag and how much on actually stopping, which is what
+  would matter on a different surface, and what would turn "it worked" into a
+  figure that can be defended.
+
+### Next up
+An on-vehicle status screen, and the README.
