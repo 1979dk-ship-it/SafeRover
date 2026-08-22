@@ -129,6 +129,17 @@ constexpr uint8_t PIN_LINE_SENSOR_RIGHT = 35;
 // swings to that level. GPIO 18 is not 5 V tolerant, so ECHO arrives through a
 // 1k/2k divider, measured at 3.42 V for a 5.1 V pulse. TRIG needs no divider in
 // the other direction: the module reads a 3.3 V output as HIGH.
+//
+// The module sits on the upper deck. It was mounted on the lower one first, and
+// from there the floor itself sometimes came back as an echo - the beam spreads
+// as it travels rather than staying a line, so from close to the ground part of
+// it reaches the floor at a shallow angle and returns. That reads as an
+// obstacle a short way ahead when there is nothing there, and it triggered
+// warnings on clear ground. Moving it up made those readings stop.
+//
+// So the mounting height is part of the calibration and not a detail of how the
+// thing is fixed down, the same as the 3.75 cm the line sensors are set at. If
+// the sensor is ever remounted lower, expect this back.
 constexpr uint8_t PIN_ULTRASONIC_TRIG = 5;
 constexpr uint8_t PIN_ULTRASONIC_ECHO = 18;
 
@@ -243,7 +254,16 @@ constexpr uint32_t PWM_MAX_DUTY =
 
 // --- Timing ---
 constexpr unsigned long LINE_PRINT_INTERVAL_MS = 200;
-constexpr unsigned long DISTANCE_READ_INTERVAL_MS = 100;
+
+// Halved from 100 along with the AEB thresholds: at 84.4 cm/s the rover covers
+// about 4.2 cm between reads instead of 8.4.
+//
+// One reading blocks for up to 85 ms, which is longer than this interval, so in
+// practice the loop measures almost back to back with no real gap between
+// readings. That is accepted at this stage because nothing else is competing
+// for loop time yet, but it makes the timing risk already recorded against
+// phase 7 larger and has to be looked at again there, once the LKA is running.
+constexpr unsigned long DISTANCE_READ_INTERVAL_MS = 50;
 
 // --- Buzzer self test ---
 // Long enough to be unmistakable in a quiet room, short enough not to be a
@@ -416,14 +436,41 @@ static_assert(DRIVE_START_PERCENT >= DRIVE_MIN_PERCENT,
 // --- AEB (autonomous emergency braking) ---
 // Three stages by distance to whatever is in front.
 //
-// NONE OF THESE IS MEASURED. At 84.4 cm/s the rover covers about 8.4 cm between
-// two distance reads, which is the floor under any threshold and under the
-// hysteresis. The braking distance itself has never been measured, so whether
-// 20 cm leaves room is open. Stop also stays clear of the sensor's blind zone
-// under ~2 cm, where the transmitter still rings as the echo arrives.
-constexpr float AEB_WARN_CM = 60.0f;
-constexpr float AEB_SLOW_CM = 35.0f;
-constexpr float AEB_STOP_CM = 20.0f;
+// Raised from 60 / 35 / 20 after the first run on the floor, where the rover
+// was seen reacting too late when driven hard at a wall. Watched by eye - the
+// serial line was not being read during those runs - so an observation and not
+// a measurement.
+//
+
+// The likely reason is that the measuring system is slow next to the old
+// thresholds. One reading blocks for up to 85 ms (three pulseIn calls at a
+// 25 ms timeout, plus two 5 ms gaps). At 84.4 cm/s the rover covers about 7 cm
+// during a reading and more again between them, so the stage machine can be
+// holding a position some 15 cm out of date. Against a 20 cm stop threshold
+// that was nearly the whole margin; 35 cm leaves several reads of room.
+//
+// The fault addressed here was late braking against a wall that does return an
+// echo, and it is resolved. What sits beside it is not a second suspect waiting
+// on evidence but a limit of the sensing method: ultrasound works by
+// reflection, so a surface angled past roughly 15 degrees sends the burst
+// sideways and a soft one absorbs it. No threshold creates information the
+// sensor never received, and no number of successful runs can prove the absence
+// of such a surface.
+//
+// The dangerous half of that is already handled - a lost echo after a close
+// reading goes to Stop, because something may have entered the blind zone. What
+// stays open is an obstacle never seen at all, which is the deliberate price of
+// not stopping in every open room.
+//
+// Calibrated by experiment rather than calculated. They were then run on the
+// floor, where the rover detected a wall and stopped at a sensible distance
+// even at full power - which is the behaviour they were chosen for, though it
+// is again by eye. The braking distance itself has still never been measured.
+// Stop also stays clear of the sensor's blind zone under ~2 cm, where the
+// transmitter is still ringing as the echo arrives.
+constexpr float AEB_WARN_CM = 90.0f;
+constexpr float AEB_SLOW_CM = 55.0f;
+constexpr float AEB_STOP_CM = 35.0f;
 
 // How much further out before a stage is left again. Without it a reading
 // resting on a threshold flickers across it on noise alone. Entering is
@@ -445,22 +492,75 @@ static_assert(AEB_STOP_EXIT_CM < AEB_SLOW_CM && AEB_SLOW_EXIT_CM < AEB_WARN_CM,
 
 // Failed readings tolerated in a row before the silence is acted on. One missed
 // echo is ordinary, and readEchoMedian already needs two of three samples, so a
-// zero is a mostly failed measurement rather than one bad sample. Three is
-// about 300 ms, some 25 cm at full power.
+// zero is a mostly failed measurement rather than one bad sample.
+//
+// What three of them come to in time does NOT follow from
+// DISTANCE_READ_INTERVAL_MS, and assuming it did is what made the previous
+// version of this comment wrong. A failed reading is the worst case for
+// duration: all three pulseIn calls run to their full timeout, which with the
+// two gaps between them is about 85 ms. That is longer than the interval, so
+// during an echo outage the measurement sets the pace and the interval is not
+// the deciding factor. Three of them is about 255 ms, roughly 21 cm at full
+// power.
 constexpr uint8_t AEB_MISSED_READS_LIMIT = 3;
+
+// How many consecutive readings Warn has to hold before it sounds.
+//
+// On ordinary runs the buzzer would chirp for a moment with the brake light
+// staying dark - Warn behaving exactly as designed, on a reading that meant
+// nothing. It happens at Warn and nowhere else, which fits the distance: at
+// 90 cm the echo has travelled 180 cm and is weak, and a glance off a wall to
+// the side or off furniture can come back at the same order of magnitude.
+//
+// An early warning can afford to confirm itself; braking cannot. Warn does not
+// touch the speed, so one reading of delay - about 4 cm at full power, at 90 cm
+// out - costs nothing. The same delay in front of Stop would not be acceptable,
+// and Slow and Stop stay immediate.
+//
+// This treats the symptom, not the cause. The cause is an outlying distance
+// reading, and a general filter making every sharp jump prove itself was
+// considered and set aside: it would add logic to the most sensitive layer in
+// the file, for something that appears in one stage and never reaches the
+// motors. If the flicker ever shows up in Slow or Stop, this will not help.
+constexpr uint8_t AEB_WARN_CONFIRM_READS = 2;
 
 // The ceiling the Slow stage imposes, as a percentage of full power. It has to
 // stay above DRIVE_MIN_PERCENT: under the floor the rover does not slow down,
 // it stops, and a stage that quietly becomes the stage below it is worse than
 // no stage at all.
-constexpr uint8_t AEB_SLOW_PERCENT = 70;
+//
+// Lowered from 70. The stretch between Slow and Stop is 20 cm, and that is the
+// stretch in which the decision to brake gets made, so the longer the rover
+// takes to cross it the more readings land inside it. Interpolating between the
+// runs that were timed - 62% gave 32.8 cm/s and 75% gave 50.6 - 70% crosses it
+// in roughly 0.45 s and 66% in roughly 0.52, about a fifth more time and a
+// fifth more readings. Those two figures are interpolated rather than measured,
+// and the response is known not to be linear, so treat them as the direction
+// rather than as numbers.
+//
+// Not 62, which is the measured floor: that is the edge where the rover still
+// moves, and a stage sitting exactly on it risks stopping the rover instead of
+// slowing it, especially as the cells sag through a session. The same reasoning
+// put DRIVE_START_PERCENT at 75 rather than at 62.
+constexpr uint8_t AEB_SLOW_PERCENT = 66;
 static_assert(AEB_SLOW_PERCENT >= DRIVE_MIN_PERCENT,
               "the slow stage must still be able to move the rover");
 
 // How old the last reading may be before the stage stops being trusted.
-// Derived from the read interval, so it follows if that changes. Three
-// intervals means the loop has stopped measuring rather than run slightly late.
-constexpr unsigned long AEB_READING_MAX_AGE_MS = DISTANCE_READ_INTERVAL_MS * 3;
+//
+// Absolute, and deliberately not derived from DISTANCE_READ_INTERVAL_MS any
+// more. The question this asks is how long may have passed since the reading,
+// and that follows from how long a measurement takes - up to 85 ms - rather
+// than from how often one is started. Deriving it from the interval created a
+// hidden dependency: halving the read rate cut the tolerance by half with
+// nobody asking for it, leaving only about 55 ms of margin over the age a
+// reading actually reaches.
+//
+// The failure direction is safe - it stops when it need not - which is exactly
+// what makes it worth guarding against. An unnecessary stop looks identical to
+// a threshold set too high, so it would have corrupted the next calibration
+// rather than announcing itself.
+constexpr unsigned long AEB_READING_MAX_AGE_MS = 300;
 
 // One value, not a flag per stage: with four booleans there is a state where
 // Warn and Stop are both set and something has to decide which wins. The order
@@ -519,6 +619,7 @@ bool commandTimedOut = true;
 // known to be empty. The first reading, 100 ms in, replaces it.
 AebStage aebStage = AebStage::Clear;
 uint8_t aebMissedReads = 0;
+uint8_t aebWarnReads = 0;
 
 // The last distance that actually came back, kept because a missing echo means
 // different things depending on what preceded it. Started just outside the warn
@@ -545,10 +646,15 @@ static uint32_t dutyFromPercent(uint8_t percent) {
 // The stage arrives as an argument rather than being read from the global, so
 // the indicators report the stage that was actually enforced - including one
 // forced by a stale reading, which the global does not know about.
-static void applyAebOutputs(bool motionRequested, AebStage stage) {
-  const bool sounding = motionRequested && stage != AebStage::Clear;
+static void applyAebOutputs(bool movingForward, AebStage stage) {
+  // Warn has to have held for a while; the two stages that act on the motors
+  // announce themselves the moment they are entered.
+  const bool confirmed =
+      stage != AebStage::Warn || aebWarnReads >= AEB_WARN_CONFIRM_READS;
+
+  const bool sounding = movingForward && stage != AebStage::Clear && confirmed;
   const bool braking =
-      motionRequested && (stage == AebStage::Slow || stage == AebStage::Stop);
+      movingForward && (stage == AebStage::Slow || stage == AebStage::Stop);
 
   digitalWrite(PIN_BUZZER, sounding ? BUZZER_SOUND : BUZZER_SILENT);
   ledcWrite(PIN_BRAKE_LIGHT, braking ? PWM_MAX_DUTY : 0);
@@ -623,7 +729,32 @@ static void safeDrive(int16_t left, int16_t right) {
   // fault, and a fault in the braking layer fails towards stopping.
   const AebStage stage = readingStale ? AebStage::Stop : aebStage;
 
-  applyAebOutputs(left != 0 || right != 0, stage);
+  // Heading at it, not merely moving. The sensor faces forward, so an obstacle
+  // in front only matters while the rover is driving towards it - reversing
+  // away from one is the safest thing an operator can do there, and announcing
+  // it says the opposite of what is meant.
+  //
+  // A positive side is forward, which drive() already encodes in the sign, so
+  // this asks about sign rather than about zero. In a pivot one side is
+  // positive and the condition holds, which is right: turning on the spot does
+  // not take the rover away from what is in front of it.
+  //
+  // Deliberately not the same test as the escape rule below. That one asks
+  // whether any side is negative, this one whether any side is positive, and a
+  // pivot answers yes to both - never limited, but still announced.
+  applyAebOutputs(left > 0 || right > 0, stage);
+
+  // Nothing asked for at all, so there is nothing to hold back. Braking a rover
+  // that is not moving arrests nothing, and it would hold both enable pins at
+  // full duty indefinitely - leaving the L298N conducting and warming slightly
+  // for no reason, on a vehicle nobody asked to move.
+  //
+  // This does not weaken the block. A forward command is still refused at Stop,
+  // below. All that changes is what happens when no command exists at all.
+  if (left == 0 && right == 0) {
+    drive(0, 0, StopMode::Coast);
+    return;
+  }
 
   // Reverse and pivot turns are escapes and are never limited. A rover pinned
   // against a wall by its own safety layer, with the only commands that would
@@ -854,6 +985,23 @@ static void updateAebStage() {
       Serial.print(distanceCm, 1);
       Serial.println(" cm");
     }
+  }
+}
+
+// Counts how long Warn has held. Kept out of updateAebStage so the stage
+// machine stays the one thing that decides what stage the rover is in, and
+// called from beside it because it counts readings rather than loop passes -
+// the loop runs thousands of times between two measurements.
+static void confirmWarnStage() {
+  if (aebStage != AebStage::Warn) {
+    aebWarnReads = 0;
+    return;
+  }
+
+  // Saturated rather than left to climb, so a long stretch at Warn cannot wrap
+  // the counter back under the limit and silence a warning that had earned it.
+  if (aebWarnReads < AEB_WARN_CONFIRM_READS) {
+    aebWarnReads++;
   }
 }
 
@@ -1315,10 +1463,11 @@ void loop() {
       }
     }
 
-    // Inside the same block as the read, so the stage is only reconsidered
-    // when there is something new to reconsider it from. Nothing acts on it
-    // yet: safeDrive still forwards untouched.
+    // Inside the same block as the read, so the stage is only reconsidered when
+    // there is something new to reconsider it from - and so the Warn counter
+    // beside it counts readings and not loop passes.
     updateAebStage();
+    confirmWarnStage();
   }
 
   // The watchdog, and the single place the motors are written.
